@@ -7,7 +7,7 @@
 # requirements) is a known follow-up, see docs/DESIGN.md. Dependabot proposes updates weekly.
 
 # --- 1. frontend ------------------------------------------------------------------------------
-FROM node:22-alpine AS frontend
+FROM node:25-alpine AS frontend
 WORKDIR /build
 # Dependencies first: this layer is reused until the lock file changes.
 COPY frontend/package.json frontend/package-lock.json ./

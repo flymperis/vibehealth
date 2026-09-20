@@ -6,9 +6,14 @@ load the file (Paperless download, or the upload from disk; memory only) -> rend
 -> Paperless OCR text as the third source (none for an upload) -> verify.combine -> save.
 
 A text report (imaging, medical opinion, prescription): load the file -> render pages -> reader A transcribes each
-page -> one text-only call writes a summary (conclusion and key findings) -> save the text and the summary. Reader B
-and the lab extractor are not used; a page that looks like a lab table is only noted (`report.looks_like_lab_page`),
-and a person can ask for the lab reading of the whole document.
+page -> one text-only call extracts the fields of that kind (report_specs.py: conclusion, findings and what the kind has:
+modality and measurements, diagnoses, medications ...) -> check them against the text (report.clean) -> save the text
+and the result. Reader B and the lab extractor are not used; a page that looks like a lab table is only noted
+(`report.looks_like_lab_page`), and a person can ask for the lab reading of the whole document.
+
+A document of kind `other` decides between the two after transcribing (`report.choose_route`): mostly lab-like pages
+-> the lab pipeline, otherwise a text report. A person can force either way; that choice is kept for later readings.
+Every reading records its route ("kind:lab", "auto:report", "manual:lab" ...) on its ExtractionRun.
 """
 
 from __future__ import annotations
@@ -22,13 +27,14 @@ from datetime import datetime
 from sqlalchemy import delete
 from sqlmodel import Session, col, func, select
 
-from . import reading_settings, report, sources
+from . import reading_settings, report, search, sources
 from .catalog import num, to_canonical_unit
 from .db import engine
 from .glm_parser import parse as parse_glm
 from .glm_parser import truncated
 from .models import (
     Document,
+    DocumentKind,
     DocumentReport,
     DocumentText,
     ExtractedValue,
@@ -40,6 +46,7 @@ from .models import (
 from .ollama import Ollama, OllamaError, PageError, SafeError, describe
 from .paperless import Paperless
 from .render import Pages
+from .report_specs import spec_for
 from .sandbox import Refused, SandboxError
 from .verify import Candidate, ReaderRow, combine, text_lines
 
@@ -62,9 +69,27 @@ async def _check_models(client: Ollama, wanted: list[str]) -> None:
             raise OllamaError(f"model {model} is not installed in Ollama")
 
 
-async def read_document(document_id: int, progress: dict, force_lab: bool = False) -> dict:
-    """Run the whole pipeline for one document. Returns the run summary. A text report is read as one
-    (transcription and summary) unless `force_lab`: then the lab-value pipeline runs whatever its kind."""
+def _forced(force: bool | str | None) -> str | None:
+    """The route a person asked for: "lab" (True or "lab") or "report"; None when nobody did."""
+    return "lab" if force is True or force == "lab" else "report" if force == "report" else None
+
+
+def _remembered_route(document_id: int) -> str | None:
+    """A document of kind `other` that was switched by hand keeps that choice when it is read again."""
+    with Session(engine) as session:
+        run = session.exec(
+            select(ExtractionRun)
+            .where(ExtractionRun.document_id == document_id, col(ExtractionRun.route).like("manual:%"),
+                   col(ExtractionRun.status) == RunStatus.DONE)
+            .order_by(col(ExtractionRun.id).desc())
+        ).first()
+    return run.route.split(":", 1)[1] if run else None
+
+
+async def read_document(document_id: int, progress: dict, force: bool | str | None = None) -> dict:
+    """Run the whole pipeline for one document. Returns the run summary. `force` is a route a person asked for:
+    "lab" (or True: a text report read for lab values whatever its kind) or "report". Otherwise the kind decides;
+    for `other` the pages do (see the module docstring)."""
     settings = reading_settings.load()
     if not settings.enabled:
         raise ReadingError("reading is turned off in Settings")
@@ -74,12 +99,19 @@ async def read_document(document_id: int, progress: dict, force_lab: bool = Fals
         if doc is None:
             raise ReadingError(f"document {document_id} not found")
         ref, title, kind = sources.DocRef.of(doc), doc.title, doc.kind
-        lab = force_lab or reads_lab_values(kind)
         run = ExtractionRun(document_id=document_id, settings=settings.model_dump_json())
         session.add(run)
         session.commit()
         session.refresh(run)
         run_id = run.id
+
+    forced = _forced(force)
+    how = "manual" if forced else "kind"
+    if forced is None and kind == DocumentKind.OTHER:
+        forced = _remembered_route(document_id)
+        how = "manual" if forced else "auto"
+    # The route when it is known before the pages are read; None: `other`, decided by its pages below.
+    route = forced or (None if how == "auto" else "lab" if reads_lab_values(kind) else "report")
 
     started = time.monotonic()
     page_errors: list[dict] = []
@@ -88,19 +120,30 @@ async def read_document(document_id: int, progress: dict, force_lab: bool = Fals
     try:
         paperless = Paperless()
         client = Ollama(settings.ollama_url, settings.timeout_seconds, settings.num_ctx, settings.keep_alive)
-        models = [settings.reader_a_model] + ([settings.reader_b_model] if lab and settings.reader_b_enabled else [])
+        may_lab = route != "report"  # (the models and the Paperless text a lab reading needs)
+        models = [settings.reader_a_model] + ([settings.reader_b_model] if may_lab and settings.reader_b_enabled else [])
         await _check_models(client, models)
 
         # Paperless: downloaded and drawn in this process, as before. Upload: drawn by the sandbox.
         pages, content = await sources.load_pages(
-            ref, paperless=paperless, use_text=settings.use_paperless_text and lab
+            ref, paperless=paperless, use_text=settings.use_paperless_text and may_lab
         )
         total = len(pages)
         _set(progress, pages=total)
 
-        if not lab:
-            await _read_report(client, settings, pages, document_id, kind, progress, page_errors)
-            return _finish(run_id, RunStatus.DONE, started, total, page_errors, "", {})
+        texts: dict[int, str] | None = None
+        if route is None:  # `other`: transcribe, then look at the pages
+            texts, transcribe_errors = await _transcribe(client, settings, pages, progress)
+            route, lab_pages, with_text = report.choose_route(texts)
+            log.info("document %s (kind other): read as %s (%d of %d pages with text look like lab results)",
+                     document_id, route, lab_pages, with_text)
+            if route == "report":
+                page_errors.extend(transcribe_errors)
+        route_name = f"{how}:{route}"
+
+        if route == "report":
+            await _read_report(client, settings, pages, document_id, kind, progress, page_errors, texts)
+            return _finish(run_id, RunStatus.DONE, started, total, page_errors, "", {}, route_name)
 
         # Reader A, page by page (the GPU holds one model at a time).
         rows_a: list[ReaderRow] = []
@@ -148,42 +191,54 @@ async def read_document(document_id: int, progress: dict, force_lab: bool = Fals
             # Keep whatever an earlier reading left rather than replace it with nothing.
             raise ReadingError("no page could be read: " + failed_a[0]["error"])
         candidates = combine(rows_a, rows_b, text_lines(content), settings.reader_b_enabled)
-        counts = save_candidates(document_id, run_id, candidates)
-        return _finish(run_id, RunStatus.DONE, started, total, page_errors, "", counts)
+        counts = save_candidates(document_id, run_id, candidates, forget_report=kind == DocumentKind.OTHER)
+        return _finish(run_id, RunStatus.DONE, started, total, page_errors, "", counts, route_name)
     except Exception as exc:
         message = describe(exc)
         if isinstance(exc, SafeError):
             log.warning("reading document %s failed: %s", document_id, message)
         else:  # the class name goes to the UI; the details stay in the log
             log.warning("reading document %s failed", document_id, exc_info=True)
-        _finish(run_id, RunStatus.ERROR, started, len(pages) if pages else 0, page_errors, message, {})
+        _finish(run_id, RunStatus.ERROR, started, len(pages) if pages else 0, page_errors, message, {},
+                f"{how}:{route}" if route else "")
         raise
     finally:
         if pages is not None:
             await asyncio.to_thread(pages.close)  # (Paperless pages: closing takes the pdfium lock, off the loop)
 
 
-async def _read_report(client: Ollama, settings, pages: Pages, document_id: int, kind, progress: dict,
-                       page_errors: list[dict]) -> None:
-    """A text report: reader A transcribes every page, then one call summarises the text. The text is kept even
-    when the summary fails (that is noted in the report, not raised: reading again retries it)."""
-    total = len(pages)
+async def _transcribe(client: Ollama, settings, pages: Pages, progress: dict) -> tuple[dict[int, str], list[dict]]:
+    """Reader A transcribes every page: ({page number: text}, page errors). A page that fails is an error entry, not
+    the end."""
     texts: dict[int, str] = {}
-    for i in range(total):
+    errors: list[dict] = []
+    for i in range(len(pages)):
         _set(progress, stage="transcribe", page=i + 1)
         try:
             png = await asyncio.to_thread(pages.png, i, settings.dpi)
         except (SandboxError, Refused) as exc:
-            page_errors.append({"page": i + 1, "reader": "A", "error": "the page could not be drawn: " + describe(exc)})
+            errors.append({"page": i + 1, "reader": "A", "error": "the page could not be drawn: " + describe(exc)})
             continue
         try:
             text, cut = await client.read_page_text(settings.reader_a_model, png)
         except PageError as exc:
-            page_errors.append({"page": i + 1, "reader": "A", "error": describe(exc)})
+            errors.append({"page": i + 1, "reader": "A", "error": describe(exc)})
             continue
         texts[i + 1] = text
         if cut:
-            page_errors.append({"page": i + 1, "reader": "A", "error": "text cut off (length): kept the partial text"})
+            errors.append({"page": i + 1, "reader": "A", "error": "text cut off (length): kept the partial text"})
+    return texts, errors
+
+
+async def _read_report(client: Ollama, settings, pages: Pages, document_id: int, kind, progress: dict,
+                       page_errors: list[dict], texts: dict[int, str] | None = None) -> None:
+    """A text report: reader A transcribes every page (unless `texts` already holds them), then one call extracts the
+    fields of the kind. The text is kept even when that fails (it is noted in the report, not raised: reading again
+    retries it)."""
+    total = len(pages)
+    if texts is None:
+        texts, errors = await _transcribe(client, settings, pages, progress)
+        page_errors.extend(errors)
     if total and not texts:
         # Keep whatever an earlier reading left rather than replace it with nothing.
         raise ReadingError("no page could be read: " + page_errors[0]["error"])
@@ -195,24 +250,24 @@ async def _read_report(client: Ollama, settings, pages: Pages, document_id: int,
 
 
 async def _summarize(client: Ollama, settings, kind, texts: dict[int, str]) -> dict:
-    """{status, error, conclusion, key_findings}. A model failure is a status, never an exception."""
+    """{status, error, conclusion, key_findings, details}. A model failure is a status, never an exception; an odd
+    answer is cleaned and checked against the text (report.clean)."""
     text = report.summary_input(texts, settings.num_ctx)
     try:
-        answer = await client.summarize(settings.reader_a_model, text, report.KIND_NAMES.get(kind, "medical document"))
+        answer = await client.summarize(settings.reader_a_model, text, spec_for(kind))
     except Exception as exc:  # noqa: BLE001 - the text is worth keeping whatever went wrong
         if isinstance(exc, SafeError):
             log.warning("summary of a report failed: %s", describe(exc))
         else:
             log.warning("summary of a report failed", exc_info=True)
-        return {"status": "failed", "error": describe(exc), "conclusion": "", "key_findings": []}
-    conclusion, findings = report.clean_summary(answer)
-    return {"status": "ok" if conclusion or findings else "empty", "error": "",
-            "conclusion": conclusion, "key_findings": findings}
+        return {"status": "failed", "error": describe(exc), "conclusion": "", "key_findings": [], "details": {}}
+    return report.clean(kind, answer, texts)
 
 
 def save_report(document_id: int, texts: dict[int, str], summary: dict, lab_pages: list[int], model: str) -> None:
-    """Replace the document's page text and summary, and the lab values of an earlier reading that nobody
-    approved (an imaging report once read by the lab extractor leaves none of its junk behind)."""
+    """Replace the document's page text, summary, kind-specific fields and search text, and the lab values of an
+    earlier reading that nobody approved (an imaging report once read by the lab extractor leaves none of its junk
+    behind)."""
     with Session(engine) as session:
         session.execute(delete(DocumentText).where(DocumentText.document_id == document_id))
         for page, text in sorted(texts.items()):
@@ -221,12 +276,15 @@ def save_report(document_id: int, texts: dict[int, str], summary: dict, lab_page
         row.summary_status, row.summary_error = summary["status"], summary["error"]
         row.conclusion = summary["conclusion"]
         row.key_findings = json.dumps(summary["key_findings"], ensure_ascii=False)
+        row.details = json.dumps(summary.get("details") or {}, ensure_ascii=False)
         row.auto_generated = True
         row.summary_model = model
         row.lab_pages = json.dumps(lab_pages)
         row.updated_at = datetime.now()
         session.add(row)
         clear_unapproved(session, document_id)
+        session.flush()
+        search.index_document(session, document_id)
         session.commit()
 
 
@@ -252,7 +310,7 @@ async def _read_b(client: Ollama, settings, pages: Pages, index: int, first_png:
     return partial, last_error + (" (kept the partial text)" if partial else "")
 
 
-def _finish(run_id, status, started, pages, page_errors, error, counts) -> dict:
+def _finish(run_id, status, started, pages, page_errors, error, counts, route: str = "") -> dict:
     with Session(engine) as session:
         run = session.get(ExtractionRun, run_id)
         run.status = status
@@ -264,6 +322,7 @@ def _finish(run_id, status, started, pages, page_errors, error, counts) -> dict:
         run.verified = counts.get("verified", 0)
         run.needs_review = counts.get("needs_review", 0)
         run.kept_approved = counts.get("kept_approved", 0)
+        run.route = route
         session.add(run)
         session.commit()
         return run_summary(run)
@@ -281,6 +340,7 @@ def run_summary(run: ExtractionRun) -> dict:
         "verified": run.verified,
         "needs_review": run.needs_review,
         "kept_approved": run.kept_approved,
+        "route": run.route,
     }
 
 
@@ -322,9 +382,10 @@ def approved_codes(session: Session, document_id: int) -> set[str]:
     ).all())
 
 
-def save_candidates(document_id: int, run_id: int | None, candidates: list[Candidate]) -> dict:
+def save_candidates(document_id: int, run_id: int | None, candidates: list[Candidate], forget_report: bool = False) -> dict:
     """Replace the document's unapproved values. Approved values stay, and a
-    test that already has an approved value gets no new row."""
+    test that already has an approved value gets no new row. `forget_report`: the document was read as a text report
+    before and is a lab document now, so that reading's text, summary and search text go."""
     counts = {"verified": 0, "needs_review": 0, "kept_approved": 0}
     with Session(engine) as session:
         keep = approved_codes(session, document_id)
@@ -342,6 +403,8 @@ def save_candidates(document_id: int, run_id: int | None, candidates: list[Candi
                 reader_a=c.reader_a, reader_b=c.reader_b,
             ))
             counts[c.status] += 1
+        if forget_report:
+            report.forget(session, document_id)
         session.commit()
     return counts
 
@@ -412,3 +475,17 @@ def reading_states(session: Session, document_ids: list[int], queue: list[int], 
             state["state"] = "done"
         out[doc_id] = state
     return out
+
+
+def read_routes(session: Session, document_ids: list[int]) -> dict[int, str]:
+    """Per document: the route of its latest finished reading ("kind:lab", "auto:report", "manual:lab" ...). A document
+    with no such reading (or one made before migration 4) is not in the result."""
+    if not document_ids:
+        return {}
+    rows = session.exec(
+        select(ExtractionRun.document_id, ExtractionRun.route)
+        .where(col(ExtractionRun.document_id).in_(document_ids), col(ExtractionRun.route) != "",
+               col(ExtractionRun.status).in_([RunStatus.DONE, RunStatus.CLEARED]))
+        .order_by(ExtractionRun.id)
+    ).all()
+    return dict(rows)  # the newest reading comes last and wins

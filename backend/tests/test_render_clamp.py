@@ -66,7 +66,8 @@ def test_the_setting_driven_300_dpi_reaches_the_readers_clamped(monkeypatch):
     client.get("/api/status")
     assert client.put("/api/reading/settings", json={"dpi": 300}).status_code == 200
     did = client.post(
-        "/api/documents/upload", files={"file": ("big.pdf", pdf(1, size=(1800, 1800)), "application/pdf")}
+        "/api/documents/upload", files={"file": ("big.pdf", pdf(1, size=(1800, 1800)), "application/pdf")},
+        data={"kind": "blood_test"},
     ).json()["document"]["id"]
     summary = asyncio.run(reading.read_document(did, {}))
     assert summary["status"] == "done"

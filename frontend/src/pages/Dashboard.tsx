@@ -6,6 +6,7 @@ import { Flag } from "../reading";
 import { Card, EmptyState, Spinner, StatCard, buttonClass, formatDate } from "../ui";
 import { DocumentRow, useOwnDocumentsOnly } from "./Documents";
 import AddDocuments from "./AddDocuments";
+import Medications from "./Medications";
 
 export default function Dashboard() {
   const { t } = useI18n();
@@ -45,6 +46,8 @@ export default function Dashboard() {
           </Card>
         )}
       </section>
+
+      <Medications />
 
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">

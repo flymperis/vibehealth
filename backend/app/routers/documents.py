@@ -18,7 +18,7 @@ from sqlalchemy import delete
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
-from .. import reading_settings, report, settings_store, sources, uploads
+from .. import reading_settings, report, search, settings_store, sources, uploads
 from ..catalog import BY_CODE, ORDER, flag_for, num, to_canonical_unit
 from ..db import engine, get_session
 from ..middleware import set_body_limit
@@ -26,6 +26,7 @@ from ..models import (
     Document,
     DocumentKind,
     DocumentReport,
+    DocumentSearch,
     DocumentSource,
     DocumentText,
     ExtractedValue,
@@ -33,7 +34,7 @@ from ..models import (
     ValueStatus,
     reads_lab_values,
 )
-from ..reading import approved_codes, clear_unapproved, mark_cleared, reading_states, run_summary
+from ..reading import approved_codes, clear_unapproved, mark_cleared, read_routes, reading_states, run_summary
 from ..security import password_hash, require_session
 from ..worker import begin_delete, end_delete, is_busy, request_read, state
 
@@ -45,6 +46,7 @@ dashboard_router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], depend
 examinations_router = APIRouter(
     prefix="/api/examinations", tags=["examinations"], dependencies=[Depends(require_session)]
 )
+search_router = APIRouter(prefix="/api/search", tags=["search"], dependencies=[Depends(require_session)])
 
 
 class DocumentOut(BaseModel):
@@ -61,7 +63,12 @@ class DocumentOut(BaseModel):
     size_bytes: int | None  # uploads
     has_file: bool  # a preview / thumbnail can be shown (an upload whose file went missing: false)
     # "lab": lab values are read from it; "text": it is a narrative report (findings and a conclusion). See models.LAB_KINDS.
+    # For a document of kind `other` it follows how the document was last read (reading.read_document).
     read_mode: str = "lab"
+    # How it was last read, "<kind|auto|manual>:<lab|report>" ("" if never, or before migration 4).
+    read_route: str = ""
+    # Kind `other`: the reading can be switched between lab and report by hand.
+    can_switch: bool = False
     reading: dict | None = None
     # A text report that has been read: {status, findings} of its automatic summary; else null.
     report: dict | None = None
@@ -72,7 +79,14 @@ def _states(session: Session, ids: list[int]) -> dict[int, dict]:
     return reading_states(session, ids, reading["queue"], reading["current"])
 
 
-def _out(doc: Document, reading: dict | None = None, summary: dict | None = None) -> DocumentOut:
+def _read_mode(doc: Document, route: str) -> str:
+    """"text" for a narrative report, "lab" otherwise. A document of kind `other` is what its last reading was."""
+    if doc.kind == DocumentKind.OTHER:
+        return "text" if route.endswith(":report") else "lab"
+    return "lab" if reads_lab_values(doc.kind) else "text"
+
+
+def _out(doc: Document, reading: dict | None = None, summary: dict | None = None, route: str = "") -> DocumentOut:
     return DocumentOut(
         id=doc.id,
         source=doc.source,
@@ -86,7 +100,9 @@ def _out(doc: Document, reading: dict | None = None, summary: dict | None = None
         mime_type=doc.mime_type,
         size_bytes=doc.size_bytes,
         has_file=sources.has_file(doc),
-        read_mode="lab" if reads_lab_values(doc.kind) else "text",
+        read_mode=_read_mode(doc, route),
+        read_route=route,
+        can_switch=doc.kind == DocumentKind.OTHER,
         reading=reading,
         report=summary,
     )
@@ -94,8 +110,8 @@ def _out(doc: Document, reading: dict | None = None, summary: dict | None = None
 
 def _outs(session: Session, docs: list[Document]) -> list[DocumentOut]:
     ids = [d.id for d in docs]
-    states, summaries = _states(session, ids), report.summaries(session, ids)
-    return [_out(d, states.get(d.id), summaries.get(d.id)) for d in docs]
+    states, summaries, routes = _states(session, ids), report.summaries(session, ids), read_routes(session, ids)
+    return [_out(d, states.get(d.id), summaries.get(d.id), routes.get(d.id, "")) for d in docs]
 
 
 def _get(session: Session, document_id: int) -> Document:
@@ -386,6 +402,7 @@ def delete_document(document_id: int, session: Session = Depends(get_session)) -
         session.execute(delete(ExtractedValue).where(col(ExtractedValue.document_id) == document_id))
         session.execute(delete(ExtractionRun).where(col(ExtractionRun.document_id) == document_id))
         session.execute(delete(DocumentText).where(col(DocumentText.document_id) == document_id))
+        session.execute(delete(DocumentSearch).where(col(DocumentSearch.document_id) == document_id))
         session.execute(delete(DocumentReport).where(col(DocumentReport.document_id) == document_id))
         session.delete(doc)
         session.commit()
@@ -429,13 +446,20 @@ def _value_out(v: ExtractedValue) -> ValueOut:
 
 
 @router.post("/{document_id}/read")
-def read(document_id: int, as_lab: bool = False, session: Session = Depends(get_session)) -> dict:
-    """Queue a reading. A text report (imaging, opinion, prescription) is transcribed and summarised;
-    `as_lab=true` reads it for lab values instead (a report with a page of blood results in it)."""
-    _get(session, document_id)
+def read(
+    document_id: int, as_lab: bool = False, as_report: bool = False, session: Session = Depends(get_session)
+) -> dict:
+    """Queue a reading. A text report (imaging, opinion, prescription) is transcribed and its fields extracted;
+    `as_lab=true` reads it for lab values instead (a report with a page of blood results in it). A document of
+    kind `other` chooses by its pages; `as_lab` / `as_report` decide for it (and are kept for later readings)."""
+    doc = _get(session, document_id)
+    if as_lab and as_report:
+        raise HTTPException(400, "choose either as_lab or as_report")
+    if as_report and doc.kind != DocumentKind.OTHER:
+        raise HTTPException(400, "as_report is for documents of kind other; the others are read as their kind says")
     if not reading_settings.load().enabled:
         raise HTTPException(409, "reading is turned off in Settings")
-    added = request_read([document_id], force_lab=as_lab)
+    added = request_read([document_id], force_lab=as_lab, force_report=as_report)
     return {"queued": bool(added), "already": not added}
 
 
@@ -445,6 +469,16 @@ def get_report(document_id: int, session: Session = Depends(get_session)) -> dic
     text of every page and the pages that look like lab results. `report` is null until it has been read."""
     doc = _get(session, document_id)
     return {"document": _outs(session, [doc])[0], "report": report.detail(session, document_id)}
+
+
+@search_router.get("")
+def search_documents(q: str = Query(min_length=1, max_length=100), session: Session = Depends(get_session)) -> dict:
+    """Documents whose title or read text (page text, summary, findings, measurements, diagnoses, medications)
+    contains every word of `q`; case and accents do not matter. Each result has a few snippets, cut from the
+    original text (`before` + `match` + `after`)."""
+    hits = search.search(session, q)
+    docs = _outs(session, [d for d, _ in hits])
+    return {"query": q, "results": [{"document": out, "snippets": snippets} for out, (_, snippets) in zip(docs, hits)]}
 
 
 @router.get("/{document_id}/values")
@@ -744,6 +778,13 @@ class DashboardSummaryOut(BaseModel):
     flagged_values: list[FlaggedValueOut]
     category_counts: list[CategoryCountOut]
     has_any_approved: bool
+
+
+@dashboard_router.get("/medications")
+def current_medications(session: Session = Depends(get_session)) -> dict:
+    """An AUTOMATIC list of the medications on recent prescriptions (report.RECENT_DAYS), newest first, one per
+    medicine. Only what the prescription text confirmed; not a treatment plan."""
+    return report.current_medications(session)
 
 
 @dashboard_router.get("/summary")

@@ -78,7 +78,7 @@ def test_legacy_db_is_baselined_and_upgraded(tmp_path):
     path = legacy_db(tmp_path)
     engine = make_engine(path)
     result = migrations.run(engine)
-    assert result["from"] == 0 and result["applied"] == [1, 2, 3] and not result["fresh"]
+    assert result["from"] == 0 and result["applied"] == [1, 2, 3, 4] and not result["fresh"]
     assert version(path) == latest_version()
     with Session(engine) as s:
         assert len(s.exec(Document.__table__.select()).all()) == 3
@@ -99,7 +99,7 @@ def test_run_twice_changes_nothing(tmp_path):
 def test_backup_before_a_data_changing_migration_is_openable(tmp_path):
     path = legacy_db(tmp_path, rows=4)
     result = migrations.run(make_engine(path), [*MIGRATIONS, V3])
-    assert result["applied"] == [1, 2, 3, NEXT]
+    assert result["applied"] == [1, 2, 3, 4, NEXT]
     backup = result["backup"]
     assert backup and os.path.dirname(backup) == str(tmp_path / "backups")
     assert os.path.basename(backup).startswith("pre-v2-")  # named after the first migration that ran

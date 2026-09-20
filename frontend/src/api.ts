@@ -104,6 +104,10 @@ export interface MedicalDocument {
   has_file: boolean;
   /** "text": a narrative report (imaging, opinion, prescription): findings and a conclusion, no lab values to review. */
   read_mode: "lab" | "text";
+  /** How it was last read: "<kind|auto|manual>:<lab|report>"; "" when never (or before migration 4). */
+  read_route: string;
+  /** Kind "other": the reading can be switched between lab and report by hand. */
+  can_switch: boolean;
   reading: ReadingState | null;
   /** A text report that has been read: how its automatic summary went; null otherwise. */
   report: ReportBrief | null;
@@ -115,6 +119,48 @@ export interface ReportBrief {
   findings: number;
   /** The start of the automatic conclusion (list line). */
   conclusion: string;
+  /** Kind-specific facts for the list line; empty/0 when the document has none (or was read before they existed). */
+  modality: "" | Modality;
+  regions: string[];
+  diagnosis: string;
+  medications: number;
+}
+
+export type Modality = "ultrasound" | "mri" | "ct" | "xray" | "other";
+
+export interface Measurement {
+  label: string;
+  value: string;
+  unit: string;
+}
+
+export interface Medication {
+  name: string;
+  active_substance: string;
+  strength: string;
+  dose_instruction: string;
+  duration_or_quantity: string;
+  /** Fields the model gave that the text did not confirm: they were left out. */
+  unverified: string[];
+}
+
+/** What the kind-specific extraction found. Every key is optional: {} for a summary written before it existed. */
+export interface ReportFields {
+  modality?: "" | Modality;
+  regions?: string[];
+  measurements?: Measurement[];
+  doctor?: string;
+  specialty?: string;
+  diagnoses?: string[];
+  recommendations?: string[];
+  follow_up?: { text?: string; date?: string };
+  prescriber?: string;
+  date?: string;
+  medications?: Medication[];
+  /** Medication entries that could not be confirmed in the text at all. */
+  dropped_medications?: number;
+  /** "prescriber" / "date" when given but not confirmed. */
+  unverified?: string[];
 }
 
 export interface DocumentPatch {
@@ -383,6 +429,7 @@ export interface RunSummary {
   verified: number;
   needs_review: number;
   kept_approved: number;
+  route: string;
 }
 
 export interface DocumentValues {
@@ -632,8 +679,41 @@ export interface ReportDetail {
   summary_model: string;
   conclusion: string;
   key_findings: string[];
+  details: ReportFields;
   /** Pages whose text looks like a table of lab results. */
   lab_pages: number[];
   updated_at: string;
   pages: { page: number; text: string }[];
+}
+
+/** GET /api/dashboard/medications: an automatic list from recent prescriptions. */
+export interface CurrentMedication extends Omit<Medication, "unverified"> {
+  unverified: string[];
+  /** The prescription's date (YYYY-MM-DD). */
+  date: string;
+  document_id: number;
+  document_title: string;
+  earlier_dates: string[];
+}
+
+export interface CurrentMedications {
+  days: number;
+  medications: CurrentMedication[];
+  /** Prescriptions with medications but no date, and ones older than `days`: not in the list. */
+  undated: number;
+  older: number;
+}
+
+/** GET /api/search: `before` + `match` + `after` are cut from the original text. */
+export interface SearchSnippet {
+  field: string;
+  page: number | null;
+  before: string;
+  match: string;
+  after: string;
+}
+
+export interface SearchResults {
+  query: string;
+  results: { document: MedicalDocument; snippets: SearchSnippet[] }[];
 }

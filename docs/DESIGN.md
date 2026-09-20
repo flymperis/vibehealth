@@ -34,7 +34,9 @@ Schema versions are tracked in `PRAGMA user_version` (see "Migrations").
 - `extraction_runs`: one reading of a document: status (running, done, error, interrupted, cleared), timing, pages,
   page errors, the settings used, counts.
 - `document_texts` (one row per page) and `document_reports` (one row per document): the transcribed text and the
-  automatic summary of a text report (see "The reading pipeline").
+  automatic summary of a text report (see "The reading pipeline"). `document_reports.details` is a JSON object with the
+  fields of the kind (`{}` for a summary written before version 4). `document_search` holds one folded text per document
+  for search. `extraction_runs.route` records how a reading went (`kind:lab`, `auto:report`, `manual:lab` ...).
 - `extracted_values`: document, run, test code (nullable), printed name, value, unit, reference range, flag, status
   (`verified`, `needs_review`, `approved`, `rejected`), reason, page, and what each reader read. A partial unique
   index allows **one approved value per test per document**.
@@ -81,6 +83,33 @@ at least four lines that hold a number, a unit and a reference range is listed i
 offers "read as blood test" (`POST /api/documents/{id}/read?as_lab=true`: the whole document goes through the lab
 readers). `GET /api/documents/{id}/report` returns the summary, the page text and `lab_pages`; the document lists carry
 `read_mode` and a short `report` line.
+
+**Fields of the kind** (`report_specs.py`, `report.py`). The summary call is per kind: `SPECS` maps a document kind to a
+`Spec` (prompt, JSON schema, length limit); other kinds use `GENERIC` (conclusion and findings only). Imaging asks for
+modality, regions and measurements; a medical opinion for doctor, specialty, diagnoses, recommendations and follow-up;
+a prescription for prescriber, date and medications. The schema lists every field as required so the model fills each,
+but nothing relies on it: `report.clean` accepts a missing, mistyped or extra field and never raises (an answer that is not
+a JSON object is a failed summary; a code fence or a sentence around the object is tolerated). Two things are checked
+against the transcribed text (folded: case, accents, final sigma and white space ignored) because a wrong one does harm: a
+measurement's number(s) and any date must be printed in it, and each medication field must occur in it as whole words. A
+medication field that does not is dropped and named in `unverified`; an entry left with neither name nor active substance
+is dropped and counted in `dropped_medications`. The UI shows what was left out, and a persistent notice on prescriptions.
+`GET /api/dashboard/medications` groups the medications of prescriptions of the last `RECENT_DAYS` (90) days by folded
+name and returns the newest entry of each with its date (the document's date, else the date read from the text).
+
+**`other` documents.** With no forced route a document of kind `other` is transcribed first, and
+`report.choose_route` decides: lab-like pages (`looks_like_lab_page`) that are at least half of the pages with text (a tie,
+or no text, means lab) go to the lab pipeline, otherwise it is a text report with the generic spec. The decision is
+logged and stored as the run's `route`; `read_mode` and `read_route` on the document follow the latest finished reading.
+`POST /documents/{id}/read?as_lab=true` or `?as_report=true` (kind `other` only) force a route, and a forced route is kept
+for later readings of that document. Switching to lab removes the report's text, summary and search row; switching to a
+report keeps approved values (unapproved ones go, as before).
+
+**Search** (`search.py`, `GET /api/search?q=`). `document_search.body` is the searchable text of a report (summary, findings,
+fields, page text) folded by `textfold.fold`, which keeps the length of the text so a match can be cut out of the
+original for a snippet. A word matches by `LIKE '%word%'` on the body or as part of a folded title; every word must match;
+the reading rebuilds the row, and a report from before version 4 is indexed by the first search. SQLite FTS5 was not used:
+it needs a build flag, does not match inside inflected Greek words without wildcards, and a personal collection is small.
 
 Ollama calls run one at a time. Before a reading starts the installed models are checked, so the person sees "Ollama
 is not reachable" or "model X is not installed" rather than a generic failure. A model that rejects `think` is retried
@@ -248,6 +277,8 @@ kept (the last 10 models); never the file, its name, the expected list or what w
 - A failed migration is rolled back completely and the app refuses to start. A database newer than the app is refused.
 - Version 2 added uploads (a rebuild of `documents` with foreign keys off, checked against a fresh schema in the tests).
 - Version 3 added `document_texts` and `document_reports` for text reports: two new tables, nothing existing is changed.
+- Version 4 added `document_reports.details` and `extraction_runs.route` (`ALTER TABLE ... ADD COLUMN` with a default, no
+  rebuild) and the `document_search` table. It takes the usual backup first; a table that is not there yet is left to `create_all`.
 - **Backing up**: the whole data folder. The database uses WAL, so copying `vibehealth.db` alone copies an empty shell: take
   `vibehealth.db*` together (or use `VACUUM INTO`), `uploads/` and `.keys/` (not needed if `SECRET_KEY` is set). `cache/`
   and `backups/` are optional. A database restored without `uploads/` still lists its documents, marked as having no file.

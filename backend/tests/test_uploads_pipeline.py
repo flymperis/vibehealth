@@ -112,7 +112,7 @@ def test_uploaded_pdf_is_read_in_full():
 
 def test_uploaded_photo_is_read_upright_and_at_the_upload_size():
     # stored 3000 x 1500 sideways, with the EXIF flag that says "turn it a quarter": really 1500 x 3000
-    did = upload(photo("JPEG", size=(3000, 1500), orientation=6), "phone.jpg", "image/jpeg")
+    did = upload(photo("JPEG", size=(3000, 1500), orientation=6), "phone.jpg", "image/jpeg", kind="blood_test")
     result = read(did)
     assert result["progress"]["pages"] == 1
     sizes = {size for _r, size in FakeOllama.sizes}
@@ -122,14 +122,14 @@ def test_uploaded_photo_is_read_upright_and_at_the_upload_size():
 
 @pytest.mark.parametrize("fmt", ["PNG", "WEBP"])
 def test_uploaded_png_and_webp_are_read(fmt):
-    did = upload(photo(fmt, size=(800, 1000)), f"scan.{fmt.lower()}", f"image/{fmt.lower()}")
+    did = upload(photo(fmt, size=(800, 1000)), f"scan.{fmt.lower()}", f"image/{fmt.lower()}", kind="blood_test")
     read(did)
     assert {size for _r, size in FakeOllama.sizes} == {(800, 1000)}  # already small: never enlarged
     assert values(did)["UREA"].status == "verified"
 
 
 def test_reading_again_replaces_unapproved_values_and_keeps_approved_ones():
-    did = upload(pdf(1), "a.pdf", "application/pdf")
+    did = upload(pdf(1), "a.pdf", "application/pdf", kind="blood_test")
     read(did)
     urea = values(did)["UREA"]
     assert client.post(f"/api/values/{urea.id}/approve").status_code == 200

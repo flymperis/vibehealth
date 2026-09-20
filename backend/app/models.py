@@ -115,6 +115,10 @@ class ExtractionRun(SQLModel, table=True):
     verified: int = 0
     needs_review: int = 0
     kept_approved: int = 0
+    # How this reading went, "<how>:<route>": how is "kind" (the kind says which), "auto" (a document of kind
+    # `other`, decided by its pages) or "manual" (asked for); route is "lab" or "report". "" for a reading made
+    # before migration 4. Last column on purpose: migration 4 adds it with ALTER TABLE.
+    route: str = Field(default="", sa_column_kwargs={"server_default": ""})
 
 
 class ValueStatus(StrEnum):
@@ -194,3 +198,16 @@ class DocumentReport(SQLModel, table=True):
     summary_model: str = ""
     lab_pages: str = "[]"  # JSON list of page numbers that look like a table of lab results
     updated_at: datetime = Field(default_factory=now)
+    # What the kind-specific extraction found (report.clean_details): a JSON object, every key optional.
+    # "{}" for a summary written before migration 4. Last column on purpose (ALTER TABLE in migration 4).
+    details: str = Field(default="{}", sa_column_kwargs={"server_default": "{}"})
+
+
+class DocumentSearch(SQLModel, table=True):
+    """The searchable text of a text report, folded (lower case, no accents: textfold.fold), one row per document.
+    Rebuilt by every reading; a report read before migration 4 is indexed by its first search (search.py)."""
+
+    __tablename__ = "document_search"
+
+    document_id: int = Field(primary_key=True, foreign_key="documents.id", ondelete="CASCADE")
+    body: str = ""

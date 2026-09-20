@@ -46,24 +46,6 @@ Rules:
 - Do not translate, summarise, explain or add anything. Do not describe images or logos.
 - If there is no text on the page, answer with nothing."""
 
-# The summary of a text report (a second, text-only call to the same model).
-PROMPT_SUMMARY = """Below is the text of a medical document ({kind}), read from scanned pages: it may contain small reading errors.
-Return JSON with two fields:
-- conclusion: the document's own conclusion, impression or opinion (e.g. "Συμπέρασμα", "Γνωμάτευση", "Impression"), copied or lightly shortened. If it has none, a summary of the document in 1 to 3 sentences.
-- key_findings: at most 8 short strings, one per important finding (what was found, where, with sizes or numbers as printed). Leave out normal boilerplate and repeated headers.
-Rules:
-- Use only what the text says. Never add a diagnosis, advice or a number that is not in the text.
-- Write in the language of the text.
-- If the text is empty or has nothing to summarise, return an empty conclusion and an empty list."""
-
-SCHEMA_SUMMARY = {
-    "type": "object",
-    "properties": {"conclusion": {"type": "string"},
-                   "key_findings": {"type": "array", "items": {"type": "string"}, "maxItems": 8}},
-    "required": ["conclusion", "key_findings"],
-}
-SUMMARY_NUM_PREDICT = 1024
-
 
 class SafeError(Exception):
     """An error whose message we wrote ourselves: fine to show in the UI (no URL, no
@@ -300,29 +282,36 @@ class Ollama:
             raise PageError("empty answer")
         return content, r.get("done_reason") == "length"
 
-    async def summarize(self, model: str, text: str, kind: str) -> dict:
-        """{conclusion, key_findings} for the text of a report: one text-only call, JSON constrained by a schema."""
+    async def summarize(self, model: str, text: str, spec) -> dict:
+        """What a text report says, as a dict: one text-only call, JSON constrained by the schema of `spec` (a
+        report_specs.Spec: its prompt, schema and length limit). The dict is unchecked (report.clean does that);
+        an answer that is not a JSON object at all is a StructuredOutputError."""
         body = {
             "model": model,
             "stream": False,
             "think": False,
             "keep_alive": self.keep_alive,
-            "options": {"num_ctx": self.num_ctx, "temperature": 0, "num_predict": SUMMARY_NUM_PREDICT},
-            "format": SCHEMA_SUMMARY,
+            "options": {"num_ctx": self.num_ctx, "temperature": 0, "num_predict": spec.num_predict},
+            "format": spec.schema,
             "messages": [
-                {"role": "system", "content": PROMPT_SUMMARY.format(kind=kind)},
+                {"role": "system", "content": spec.prompt},
                 {"role": "user", "content": text},
             ],
         }
-        content = self._content(await self._chat(body))
+        return _json_object(self._content(await self._chat(body)))
+
+
+def _json_object(content: str) -> dict:
+    """The JSON object in a model's answer. A model that ignores `format` may wrap it in a code fence or a
+    sentence: the outermost braces are tried before giving up."""
+    for candidate in (content, content[content.find("{"):content.rfind("}") + 1]):
         try:
-            data = json.loads(content)
-            conclusion, findings = data["conclusion"], data["key_findings"]
-        except (ValueError, KeyError, TypeError) as exc:
-            raise StructuredOutputError(BAD_JSON) from exc
-        if not isinstance(conclusion, str) or not isinstance(findings, list):
-            raise StructuredOutputError(BAD_JSON)
-        return {"conclusion": conclusion, "key_findings": [f for f in findings if isinstance(f, str)]}
+            data = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise StructuredOutputError(BAD_JSON)
 
 
 def _keep_alive(value: str) -> str | int:

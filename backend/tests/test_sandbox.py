@@ -476,7 +476,7 @@ def test_a_page_that_cannot_be_drawn_is_a_page_error_and_the_reading_goes_on(mon
     monkeypatch.setattr(reading, "Paperless", NoPaperless)
     monkeypatch.setattr(reading, "Ollama", FakeOllama)
     client.get("/api/status")
-    did = client.post("/api/documents/upload", files={"file": ("a.pdf", pdf(2), "application/pdf")}).json()["document"]["id"]
+    did = client.post("/api/documents/upload", files={"file": ("a.pdf", pdf(2), "application/pdf")}, data={"kind": "blood_test"}).json()["document"]["id"]
     real = sandbox.SandboxPages.png
 
     def png(self, index, dpi):

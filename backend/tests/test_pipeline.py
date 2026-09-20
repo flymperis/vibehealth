@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from app import reading
 from app.db import engine
-from app.models import Document, ExtractedValue, ExtractionRun
+from app.models import Document, DocumentKind, ExtractedValue, ExtractionRun
 from app.ollama import PageError, describe
 from app.render import Pages
 
@@ -85,7 +85,7 @@ def test_pipeline_end_to_end(monkeypatch):
     monkeypatch.setattr(reading, "Ollama", FakeOllama)
     FakeOllama.calls = []
     with Session(engine) as s:
-        doc = Document(paperless_id=5, title="synthetic")
+        doc = Document(paperless_id=5, title="synthetic", kind=DocumentKind.BLOOD_TEST)
         s.add(doc)
         s.commit()
         doc_id = doc.id

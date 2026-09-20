@@ -235,10 +235,35 @@ def _text_reports(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# Version 4: what the kind-specific extraction of a text report found (a JSON column on the summary), how a reading
+# went (`route`, which of the two pipelines read the document) and the folded text that search looks through. Two
+# ADD COLUMNs (each with a default, so old rows are valid and nothing is rebuilt) and one new table. Written out
+# like the others; each step is skipped where it is already there, so it is harmless on a database that has it.
+_SEARCH_V4 = """
+CREATE TABLE IF NOT EXISTS document_search (
+    document_id INTEGER NOT NULL,
+    body VARCHAR NOT NULL,
+    PRIMARY KEY (document_id),
+    FOREIGN KEY(document_id) REFERENCES documents (id) ON DELETE CASCADE
+)
+"""
+
+
+def _report_details(conn: sqlite3.Connection) -> None:
+    # (A table that does not exist yet is left to `create_all`, which builds it with the column.)
+    reports, runs = _columns(conn, "document_reports"), _columns(conn, "extraction_runs")
+    if reports and "details" not in reports:
+        conn.execute("ALTER TABLE document_reports ADD COLUMN details VARCHAR DEFAULT '{}' NOT NULL")
+    if runs and "route" not in runs:
+        conn.execute("ALTER TABLE extraction_runs ADD COLUMN route VARCHAR DEFAULT '' NOT NULL")
+    conn.execute(_SEARCH_V4)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "baseline", _baseline, changes_data=False),
     Migration(2, "uploads: documents source and file columns", _uploads, foreign_keys_off=True),
     Migration(3, "text reports: page text and automatic summary tables", _text_reports),
+    Migration(4, "report details, reading route and search text", _report_details),
 ]
 
 

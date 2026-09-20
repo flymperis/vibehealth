@@ -3,9 +3,10 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type MedicalDocument, type SystemStatus } from "../api";
 import { useI18n } from "../i18n";
-import { DocumentBadge, Pill, isActive } from "../reading";
+import { DocumentBadge, Pill, isActive, kindLine } from "../reading";
 import { Button, Card, EmptyState, Spinner, formatDate } from "../ui";
 import AddDocuments from "./AddDocuments";
+import DocumentSearch from "./DocumentSearch";
 import { DeleteDocumentDialog, EditDocumentDialog } from "./DocumentDialogs";
 
 /** No Paperless to sync from: the list can only fill by uploading. */
@@ -20,6 +21,7 @@ export const useOwnDocumentsOnly = () => {
 export default function Documents() {
   const { t } = useI18n();
   const [showHidden, setShowHidden] = useState(false);
+  const [searching, setSearching] = useState(false);
   const ownOnly = useOwnDocumentsOnly();
   const { data, isLoading } = useQuery({
     queryKey: ["documents", showHidden],
@@ -46,7 +48,8 @@ export default function Documents() {
         </label>
       </div>
       {!!data?.length && <AddDocuments />}
-      {!data?.length ? (
+      {!!data?.length && <DocumentSearch onActive={setSearching} />}
+      {searching ? null : !data?.length ? (
         <EmptyState>
           <div className="flex flex-col items-center gap-3">
             <span>{ownOnly ? t("docs.emptyOwn") : `${t("docs.empty")} ${t("docs.emptyOrAdd")}`}</span>
@@ -132,6 +135,7 @@ export function DocumentRow({ doc, compact }: { doc: MedicalDocument; compact?: 
         <p className="text-xs muted">
           {doc.doc_date ? formatDate(doc.doc_date) : t("doc.notSet")} · {t(`kind.${doc.kind}` as "kind.other")}
         </p>
+        {kindLine(t, doc) && <p className="text-xs [overflow-wrap:anywhere]">{kindLine(t, doc)}</p>}
         {compact && doc.report?.conclusion && (
           <p className="mt-0.5 line-clamp-2 text-xs [overflow-wrap:anywhere]">{doc.report.conclusion}</p>
         )}

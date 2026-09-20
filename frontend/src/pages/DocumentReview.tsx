@@ -4,12 +4,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   type CatalogTest,
+  type DocumentKind,
   type MedicalDocument,
+  type Medication,
   type DocumentReport,
   type DocumentValues,
   type ExtractedValue,
   type ReadingSettingsResponse,
   type ReportDetail,
+  type ReportFields,
   type ValueStatus,
 } from "../api";
 import { useI18n } from "../i18n";
@@ -19,6 +22,8 @@ import { refreshDocumentQueries } from "../upload";
 import { DeleteDocumentDialog, EditDocumentDialog } from "./DocumentDialogs";
 
 const GROUPS: ValueStatus[] = ["needs_review", "verified", "approved", "rejected"];
+
+type ReadMode = "auto" | "lab" | "report";
 
 export default function DocumentReview() {
   const { id } = useParams();
@@ -55,7 +60,9 @@ export default function DocumentReview() {
   const onError = (e: Error) => setNotice(e.message || t("common.error"));
 
   const read = useMutation({
-    mutationFn: (asLab: boolean) => api.post(`/documents/${id}/read${asLab ? "?as_lab=true" : ""}`),
+    // "auto": the kind decides (for "other": the pages); "lab" / "report": a choice the person made.
+    mutationFn: (mode: ReadMode) =>
+      api.post(`/documents/${id}/read${mode === "lab" ? "?as_lab=true" : mode === "report" ? "?as_report=true" : ""}`),
     onMutate: () => setNotice(""),
     onSuccess: refresh,
     onError,
@@ -116,7 +123,7 @@ export default function DocumentReview() {
 
       <Card className="flex flex-col gap-3 p-4">
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => read.mutate(false)} disabled={active || !enabled || read.isPending}>
+          <Button onClick={() => read.mutate("auto")} disabled={active || !enabled || read.isPending}>
             {hasRead ? t("review.readAgain") : textMode ? t("review.readReport") : t("review.read")}
           </Button>
           {doc.has_file && (
@@ -192,12 +199,17 @@ export default function DocumentReview() {
         {notice && <p className="text-sm">{notice}</p>}
       </Card>
 
+      {/* A document of kind "other" is read as a blood test or as a report, by its pages; this says which and switches. */}
+      {doc.can_switch && !active && (
+        <SwitchPanel doc={doc} disabled={!enabled || read.isPending} onRead={(mode) => read.mutate(mode)} />
+      )}
+
       {textMode && report && (
         <>
-          {report.lab_pages.length > 0 && values.length === 0 && !active && (
-            <LabNotice pages={report.lab_pages} disabled={!enabled || read.isPending} onRead={() => read.mutate(true)} />
+          {!doc.can_switch && report.lab_pages.length > 0 && values.length === 0 && !active && (
+            <LabNotice pages={report.lab_pages} disabled={!enabled || read.isPending} onRead={() => read.mutate("lab")} />
           )}
-          <ReportView report={report} />
+          <ReportView report={report} kind={doc.kind} />
         </>
       )}
       {textMode && !report && !active && values.length === 0 && <EmptyState>{t("report.notRead")}</EmptyState>}
@@ -355,25 +367,68 @@ function LabNotice({ pages, disabled, onRead }: { pages: number[]; disabled: boo
   );
 }
 
-/** The automatic summary of a text report, its key findings and the transcribed text of every page. */
-function ReportView({ report }: { report: ReportDetail }) {
+/** How a document of kind "other" was read (by its pages, or as the person chose), and the way to switch. */
+function SwitchPanel({
+  doc,
+  disabled,
+  onRead,
+}: {
+  doc: MedicalDocument;
+  disabled: boolean;
+  onRead: (mode: "lab" | "report") => void;
+}) {
+  const { t } = useI18n();
+  const [how, route] = doc.read_route.split(":");
+  const known = (how === "auto" || how === "manual") && (route === "lab" || route === "report");
+  return (
+    <div className="flex flex-col gap-2 rounded-xl bg-sky-500/10 p-3">
+      <p className="text-sm">{known ? t(`route.${how}.${route}` as "route.auto.lab") : t("route.unknown")}</p>
+      <p className="text-xs muted">{t("route.hint")}</p>
+      <div className="flex flex-wrap gap-2">
+        {route !== "lab" && (
+          <Button variant="ghost" onClick={() => onRead("lab")} disabled={disabled}>
+            {t("report.labRead")}
+          </Button>
+        )}
+        {route !== "report" && (
+          <Button variant="ghost" onClick={() => onRead("report")} disabled={disabled}>
+            {t("route.toReport")}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The automatic summary of a text report, the fields its kind has, its key findings and the transcribed text of
+ * every page. Every field is optional: a summary written before the fields existed shows what it has.
+ */
+function ReportView({ report, kind }: { report: ReportDetail; kind: DocumentKind }) {
   const { t } = useI18n();
   const failed = report.summary_status === "failed";
   const empty = report.summary_status === "empty";
+  const details = report.details ?? {};
+  const prescription = kind === "prescription";
   return (
     <>
+      {/* A dose is the one thing here that must not be taken from a model: the notice stays as long as the report is shown. */}
+      {prescription && (
+        <div className="rounded-xl bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">{t("med.notice")}</div>
+      )}
       <Card className="flex flex-col gap-3 p-4">
         {/* Written by a local model, not by the report's author: the label says so, the original prevails. */}
         <p className="text-[11px] font-medium uppercase tracking-wide muted">{t("report.auto")}</p>
         {failed && <p className="text-sm text-amber-600">{t("report.summaryFailed", { error: report.summary_error })}</p>}
-        {empty && <p className="text-sm text-amber-600">{t("report.summaryEmpty")}</p>}
+        {empty && !prescription && <p className="text-sm text-amber-600">{t("report.summaryEmpty")}</p>}
+        <KindFields details={details} kind={kind} />
         {report.conclusion && (
           <div className="flex flex-col gap-1">
             <h2 className="text-sm font-semibold">{t("report.conclusion")}</h2>
             <p className="text-sm [overflow-wrap:anywhere]">{report.conclusion}</p>
           </div>
         )}
-        {!failed && !empty && (
+        {!failed && !empty && (!prescription || report.key_findings.length > 0) && (
           <div className="flex flex-col gap-1">
             <h2 className="text-sm font-semibold">{t("report.findings")}</h2>
             {report.key_findings.length ? (
@@ -403,6 +458,179 @@ function ReportView({ report }: { report: ReportDetail }) {
           </div>
         </details>
       </Card>
+    </>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <h2 className="text-sm font-semibold">{title}</h2>
+      {children}
+    </div>
+  );
+}
+
+function Bullets({ items }: { items: string[] }) {
+  return (
+    <ul className="list-disc pl-5 text-sm [overflow-wrap:anywhere]">
+      {items.map((x, i) => (
+        <li key={i}>{x}</li>
+      ))}
+    </ul>
+  );
+}
+
+/** The fields of an imaging report, an opinion or a prescription, whichever the summary has (all are optional). */
+function KindFields({ details, kind }: { details: ReportFields; kind: DocumentKind }) {
+  const { t } = useI18n();
+  const d = details;
+  const who = [d.doctor, d.specialty].filter(Boolean).join(" · ");
+  const followUp = d.follow_up?.text || d.follow_up?.date;
+  const meds = d.medications ?? [];
+  const left = [...(d.unverified ?? [])].map((f) => t(`fields.${f}` as "fields.date")).join(", ");
+  return (
+    <>
+      {(d.modality || !!d.regions?.length) && (
+        <div className="flex flex-wrap items-center gap-1">
+          {d.modality && <Pill tone="blue">{t(`modality.${d.modality}` as "modality.other")}</Pill>}
+          {d.regions?.map((r) => (
+            <Pill key={r} tone="gray">
+              {r}
+            </Pill>
+          ))}
+        </div>
+      )}
+      {!!d.measurements?.length && (
+        <Section title={t("fields.measurements")}>
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs muted">
+              <tr>
+                <th className="py-1 pr-3 font-medium">{t("fields.measurement")}</th>
+                <th className="py-1 font-medium">{t("fields.value")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.measurements.map((m, i) => (
+                <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
+                  <td className="py-1 pr-3 align-top [overflow-wrap:anywhere]">{m.label}</td>
+                  <td className="py-1 align-top whitespace-nowrap font-semibold">
+                    {m.value} <span className="font-normal muted">{m.unit}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      )}
+      {who && (
+        <Section title={t("fields.doctor")}>
+          <p className="text-sm [overflow-wrap:anywhere]">{who}</p>
+        </Section>
+      )}
+      {!!d.diagnoses?.length && (
+        <Section title={t("fields.diagnoses")}>
+          <Bullets items={d.diagnoses} />
+        </Section>
+      )}
+      {!!d.recommendations?.length && (
+        <Section title={t("fields.recommendations")}>
+          <Bullets items={d.recommendations} />
+        </Section>
+      )}
+      {followUp && (
+        <Section title={t("fields.followUp")}>
+          <p className="text-sm [overflow-wrap:anywhere]">
+            {d.follow_up?.text}
+            {d.follow_up?.date && ` ${d.follow_up.text ? "· " : ""}${t("fields.followUpDate", { date: formatDate(d.follow_up.date) })}`}
+          </p>
+        </Section>
+      )}
+      {kind === "prescription" && (
+        <>
+          {(d.prescriber || d.date) && (
+            <p className="text-sm [overflow-wrap:anywhere]">
+              {d.prescriber && (
+                <>
+                  <span className="muted">{t("fields.prescriber")}: </span>
+                  {d.prescriber}
+                </>
+              )}
+              {d.prescriber && d.date && " · "}
+              {d.date && (
+                <>
+                  <span className="muted">{t("fields.date")}: </span>
+                  {formatDate(d.date)}
+                </>
+              )}
+            </p>
+          )}
+          {left && <p className="text-xs text-amber-600">{t("med.unverified", { fields: left })}</p>}
+          <Section title={t("fields.medications")}>
+            {meds.length ? <MedicationTable meds={meds} /> : <p className="text-sm muted">{t("fields.noMeds")}</p>}
+            {!!d.dropped_medications && (
+              <p className="text-xs text-amber-600">
+                {d.dropped_medications === 1 ? t("med.dropped1") : t("med.dropped", { n: d.dropped_medications })}
+              </p>
+            )}
+          </Section>
+        </>
+      )}
+    </>
+  );
+}
+
+const MED_COLS = ["name", "active_substance", "strength", "dose_instruction", "duration_or_quantity"] as const;
+
+/** Medications as read from the text: a field the text did not confirm was left out and is named under its row. */
+function MedicationTable({ meds }: { meds: Medication[] }) {
+  const { t } = useI18n();
+  const left = (m: Medication) =>
+    (m.unverified ?? []).map((f) => t(`med.${f}` as "med.name")).join(", ");
+  return (
+    <>
+      <div className="hidden overflow-x-auto lg:block">
+        <table className="w-full text-left text-sm">
+          <thead className="text-xs muted">
+            <tr>
+              {MED_COLS.map((c) => (
+                <th key={c} className="px-2 py-1 font-medium">
+                  {t(`med.${c}`)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {meds.map((m, i) => (
+              <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
+                {MED_COLS.map((c) => (
+                  <td key={c} className={`px-2 py-1.5 align-top [overflow-wrap:anywhere] ${c === "name" ? "font-medium" : ""}`}>
+                    {m[c] || <span className="muted">—</span>}
+                    {c === "name" && !!m.unverified?.length && (
+                      <p className="mt-1 text-xs font-normal text-amber-600">{t("med.unverified", { fields: left(m) })}</p>
+                    )}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex flex-col lg:hidden">
+        {meds.map((m, i) => (
+          <dl key={i} className="flex flex-col gap-0.5 py-2 text-sm" style={{ borderTop: i ? "1px solid var(--border)" : undefined }}>
+            {MED_COLS.map((c) => (
+              <div key={c} className="flex gap-2">
+                <dt className="w-28 shrink-0 text-xs muted">{t(`med.${c}`)}</dt>
+                <dd className={`min-w-0 [overflow-wrap:anywhere] ${c === "name" ? "font-medium" : ""}`}>
+                  {m[c] || <span className="muted">—</span>}
+                </dd>
+              </div>
+            ))}
+            {!!m.unverified?.length && <p className="text-xs text-amber-600">{t("med.unverified", { fields: left(m) })}</p>}
+          </dl>
+        ))}
+      </div>
     </>
   );
 }

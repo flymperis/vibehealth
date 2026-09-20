@@ -113,6 +113,34 @@ If the summary fails the text is kept and Read again retries it. A page that loo
 a notice with a button to read the whole document as a blood test. Blood tests and documents of kind "other" are read
 for values as before; which kinds are which is one constant, `LAB_KINDS` in `backend/app/models.py`.
 
+**What each kind extracts.** The same call also fills in fields for the kind. Every field is optional and marked
+automatic; a field the model left empty simply does not show.
+
+| Kind | Fields |
+| --- | --- |
+| Imaging | type of exam (ultrasound, MRI, CT, X-ray, other), body regions, measurements (label, value, unit), conclusion, key findings |
+| Medical opinion | doctor, specialty, diagnoses, recommendations, follow-up (text and, if printed, a date), conclusion, key findings |
+| Prescription | prescriber, date, medications (name, active substance, strength, how to take it, duration or quantity) |
+
+**Nothing is inferred.** A measurement's number and a date must be printed in the transcribed text, or they are dropped.
+For a prescription every medication field must be found in the text (case, accents and spacing ignored, whole words); a
+field that is not there is left out and named on the page ("not confirmed in the text"), and an entry whose name and
+active substance both fail is left out altogether. Prescriptions always show a notice to read the original before relying
+on a dose. **Current medication** on the home page lists the medications of the prescriptions of the last 90 days (grouped
+by name, newest prescription, with its date); it is an automatic list, not a treatment plan, and says so.
+
+**Documents of kind "other"** are transcribed first: if lab-like pages are at least half of the pages that have text,
+they go through the lab readers as before, otherwise they are read as a narrative report (generic summary). The document
+shows which path was used and a button to switch ("Read as blood test" / "Read as report"); a choice you made is kept
+when you read again. Blood tests are unchanged.
+
+**Search** on the Documents page looks through the read text of every page, the summaries, findings, measurements,
+diagnoses, medications and the titles. Case and Greek accents do not matter; every word must be found.
+
+**Tuning.** The prompts and JSON schemas for each kind are data in `backend/app/report_specs.py` (one `Spec` per kind, and
+`GENERIC`); how an answer is cleaned and checked is `backend/app/report.py` (`clean_details`). The window of the medication
+list is `RECENT_DAYS` there. The text reports are read by reader A, so a better model helps them directly.
+
 ## Configuration
 
 Everything can be set in the app. Environment variables are optional defaults: copy `.env.example` to `.env` and

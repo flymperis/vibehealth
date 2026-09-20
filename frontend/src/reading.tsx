@@ -98,6 +98,22 @@ export function ReadingBadge({ reading }: { reading: ReadingState | null | undef
 }
 
 /**
+ * A short line for a list card, from what its automatic summary found: "Ultrasound · thyroid" (imaging), the first
+ * diagnosis (opinion), "3 medications" (prescription). Empty when there is nothing to say (or it was read before
+ * these fields existed).
+ */
+export function kindLine(t: T, doc: MedicalDocument): string {
+  const r = doc.report;
+  if (!r || doc.read_mode !== "text") return "";
+  const parts: string[] = [];
+  if (r.modality) parts.push(t(`modality.${r.modality}` as "modality.other"));
+  if (r.regions?.length) parts.push(r.regions.join(", "));
+  if (r.diagnosis) parts.push(r.diagnosis);
+  if (r.medications) parts.push(r.medications === 1 ? t("fields.meds1") : t("fields.meds", { n: r.medications }));
+  return parts.join(" · ");
+}
+
+/**
  * The badge of a document in a list. A text report (imaging, opinion, prescription) shows what its automatic
  * summary found instead of lab counts; every other document, and a report never read as one, shows the reading.
  */

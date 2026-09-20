@@ -84,8 +84,8 @@ class FakeOllama:
         FakeOllama.calls.append("text")
         return (IMAGING_PAGE if len([c for c in FakeOllama.calls if c == "text"]) == 1 else LAB_PAGE), False
 
-    async def summarize(self, model, text, kind):
-        FakeOllama.calls.append(("summary", kind, text))
+    async def summarize(self, model, text, spec):
+        FakeOllama.calls.append(("summary", spec.name, text))
         if isinstance(FakeOllama.summary, Exception):
             raise FakeOllama.summary
         return FakeOllama.summary
@@ -142,11 +142,10 @@ def test_migration_3_adds_two_tables_and_touches_nothing_else(tmp_path):
         c.execute("DROP TABLE IF EXISTS document_reports")
     before = dump(path)
 
-    result = migrations.run(make_engine(path))
+    result = migrations.run(make_engine(path), MIGRATIONS[:3])
     assert result["applied"] == [3] and version(path) == 3
     assert result["backup"] and "pre-v3-" in result["backup"]  # a database with data is copied first
     assert dump(path) == before  # no existing table changed
-    assert shape(path) == fresh_shape(tmp_path)  # and the result is what a fresh install has
     with sqlite3.connect(path) as c:
         assert c.execute("SELECT count(*) FROM document_texts").fetchone()[0] == 0
         assert c.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -195,7 +194,10 @@ def test_the_other_report_kinds_are_read_as_text(kind):
 def test_lab_kinds_still_use_the_lab_readers(kind):
     FakeOllama.installed = ["qwen3.5:4b", "glm-ocr:latest"]
     read(make_doc(kind))
-    assert "rows" in FakeOllama.calls and "glm" in FakeOllama.calls and "text" not in FakeOllama.calls
+    assert "rows" in FakeOllama.calls and "glm" in FakeOllama.calls
+    # a blood test goes straight to the lab readers; `other` is transcribed first, to see what it is (here one of two
+    # pages looks like lab results: a tie goes to the lab readers, what `other` always did)
+    assert ("text" in FakeOllama.calls) == (kind == DocumentKind.OTHER)
     with Session(engine) as s:
         assert s.exec(select(DocumentReport)).all() == []
 
@@ -312,7 +314,8 @@ def test_the_api_shows_the_report_and_the_read_mode():
     listed = {d["id"]: d for d in client.get("/api/documents").json()}
     assert listed[doc_id]["read_mode"] == "text" and listed[other]["read_mode"] == "lab"
     assert listed[doc_id]["report"] == {
-        "status": "ok", "findings": 1, "conclusion": "Small gallbladder wall polyp."}
+        "status": "ok", "findings": 1, "conclusion": "Small gallbladder wall polyp.",
+        "modality": "", "regions": [], "diagnosis": "", "medications": 0}
     assert listed[other]["report"] is None
     exams = client.get("/api/examinations", params={"kind": "imaging"}).json()
     assert exams["documents"][0]["report"]["findings"] == 1
@@ -331,6 +334,6 @@ def test_read_as_lab_queues_a_lab_reading():
     doc_id = make_doc(DocumentKind.IMAGING)
     assert client.post(f"/api/documents/{doc_id}/read", params={"as_lab": "true"}).json() == {
         "queued": True, "already": False}
-    assert doc_id in worker._force_lab
-    worker._force_lab.clear()
+    assert worker._force[doc_id] == "lab"
+    worker._force.clear()
     worker.state["reading"]["queue"].clear()

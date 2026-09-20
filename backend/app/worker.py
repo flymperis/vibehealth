@@ -104,20 +104,21 @@ def sync_plan() -> SyncPlan:
 # claims are made under this lock, from request threads and from the reading loop.
 _busy_lock = threading.Lock()
 _deleting: set[int] = set()
-# Queued documents that are to be read for lab values whatever their kind (a text report with a lab page in it).
-_force_lab: set[int] = set()
+# Queued documents whose route a person chose: "lab" (a text report with a lab page in it, or an `other` document) or
+# "report" (an `other` document that is a narrative). reading.read_document takes it from here.
+_force: dict[int, str] = {}
 
 
-def request_read(document_ids: list[int], force_lab: bool = False) -> list[int]:
-    """Queue documents for reading; returns the ones actually added. `force_lab`: read them with the lab
-    readers even if their kind says text report."""
+def request_read(document_ids: list[int], force_lab: bool = False, force_report: bool = False) -> list[int]:
+    """Queue documents for reading; returns the ones actually added. `force_lab`: read them with the lab readers
+    even if their kind says text report. `force_report`: read them as a text report even if the kind says lab."""
     reading = state["reading"]
     with _busy_lock:
         current = (reading["current"] or {}).get("document_id")
         added = [d for d in document_ids if d not in reading["queue"] and d != current and d not in _deleting]
         reading["queue"].extend(added)
-        if force_lab:
-            _force_lab.update(added)
+        if force_lab or force_report:
+            _force.update({d: "lab" if force_lab else "report" for d in added})
     if added:
         _read_wake.set()
     return added
@@ -233,13 +234,12 @@ async def read_one(document_id: int) -> None:
     progress = {"document_id": document_id, "title": "", "stage": "queued", "page": 0, "pages": 0,
                 "started_at": datetime.now().isoformat(timespec="seconds")}
     with _busy_lock:
-        force_lab = document_id in _force_lab
-        _force_lab.discard(document_id)
+        force = _force.pop(document_id, None)
         if document_id in _deleting:  # deleted while it waited in the queue
             return
         reading["current"] = progress
     try:
-        summary = await read_document(document_id, progress, force_lab)
+        summary = await read_document(document_id, progress, force)
         reading["last_run"] = {"document_id": document_id, "title": progress["title"], **summary}
         reading["last_error"] = None
     except Exception as exc:  # noqa: BLE001 - surfaced in the UI

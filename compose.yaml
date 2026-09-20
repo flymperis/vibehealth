@@ -1,0 +1,113 @@
+# VibeHealth - Docker Compose / Podman Compose.
+#
+#   docker compose up -d --build            # start (builds the image the first time)
+#   docker compose logs vibehealth          # the one-time setup code is printed here
+#   docker compose --profile ollama up -d   # ...and also start the bundled Ollama (recommended)
+#
+# Then open http://127.0.0.1:5001 and follow the setup guide.
+
+name: vibehealth
+
+services:
+  vibehealth:
+    build: .
+    image: vibehealth:latest
+    container_name: vibehealth
+    restart: unless-stopped
+
+    ports:
+      # Loopback only by default: reachable from this machine and nowhere else.
+      # To reach it from your LAN or Tailscale, set VIBEHEALTH_BIND to that address (in .env next to this
+      # file, or in the shell), e.g.  VIBEHEALTH_BIND=192.0.2.10   (never 0.0.0.0 on a machine that faces
+      # the internet). Then read "Exposing safely" in the README (allowed hosts, TLS reverse proxy).
+      - "${VIBEHEALTH_BIND:-127.0.0.1}:5001:5001"
+
+    volumes:
+      # A named volume works out of the box: Docker copies the image's ownership (uid 10001) into it.
+      - vibehealth-data:/data
+      # Or keep the data in a plain folder next to this file (easier to back up). The app runs as
+      # uid 10001, so the folder must belong to it, or the app cannot write:
+      #   Docker:          mkdir data && sudo chown 10001:10001 data
+      #   rootless Podman: use "./data:/data:Z,U" ("U" chowns it for you, "Z" is for SELinux)
+      # - ./data:/data
+
+    # Reach Ollama running on this machine (the default OLLAMA_URL is http://host.docker.internal:11434).
+    # The recommended way is the bundled ollama service below (--profile ollama). A host Ollama has no
+    # authentication and must be bound to the container bridge address only; see "Ollama" in the README.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Hardening. The app only writes to /data and /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # mem_limit: 1g        # suggested cap; reading a page peaks well below it
+
+    # Tells the app where the port above is published, so it can skip the start-up "listening on 0.0.0.0"
+    # warnings when that is a loopback address and warn otherwise. It is the same value as the port
+    # binding, so the two cannot drift apart.
+    environment:
+      VIBEHEALTH_PUBLISHED_ON: ${VIBEHEALTH_BIND:-127.0.0.1}
+
+    # Every setting is optional and can also be changed in the app. See .env.example, then either
+    # uncomment the next two lines after `cp .env.example .env`, or add variables to environment:.
+    # env_file:
+    #   - .env
+    # More variables can go in the environment: block above, for example:
+    #   OLLAMA_URL: http://ollama:11434        # when using the bundled ollama service below
+    #   VIBEHEALTH_ALLOWED_HOSTS: health.example.com
+    #   VIBEHEALTH_TRUST_PROXY: "1"
+
+    # Same check as the Dockerfile (repeated so that Podman's OCI image format keeps it too).
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:5001/api/health', timeout=4).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  # Optional: Ollama in a container instead of on the host. Start with `--profile ollama`.
+  # Then point VibeHealth at it with OLLAMA_URL=http://ollama:11434 (environment above or .env),
+  # and pull the two models once:
+  #   docker compose exec ollama ollama pull qwen3.5:4b
+  #   docker compose exec ollama ollama pull glm-ocr
+  ollama:
+    profiles: ["ollama"]
+    # A concrete version (bump it deliberately, or let Dependabot propose it). Pinning by digest is a follow-up.
+    image: ollama/ollama:0.34.2
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # Hardening. NOT TESTED against the official image (no container run was possible when this was
+    # written): if the model does not load or the GPU is not used, remove cap_drop first.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Not published: only VibeHealth (same compose network) needs to reach it. To use it from the
+    # host too:  ports: ["127.0.0.1:11434:11434"]
+    #
+    # NVIDIA GPU (needs the NVIDIA Container Toolkit on the host). Uncomment for Docker:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # Podman (CDI, after `nvidia-ctk cdi generate`):
+    # devices:
+    #   - nvidia.com/gpu=all
+    # Without a GPU it runs on the CPU: it works, but every page takes much longer.
+
+volumes:
+  vibehealth-data:
+  ollama-models:

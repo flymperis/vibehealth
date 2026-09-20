@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+/* Dark mode follows the OS unless the user picks a side (html[data-theme]). */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --color-ink: #0f172a;
+  --color-brand: #10b981;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #e5e7eb;
+  --text: #0f172a;
+  --muted: #64748b;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b1120;
+  --surface: #131c2f;
+  --border: #223049;
+  --text: #e8edf7;
+  --muted: #94a3b8;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* Room for the iPhone home indicator under the tab bar. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@utility surface {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+@utility muted {
+  color: var(--muted);
+}

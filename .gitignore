@@ -1,0 +1,34 @@
+# Build output and dependencies
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local data and snapshots - never in the repository
+data/
+uploads/
+backups/
+archive/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Secrets and keys
+.env
+*.env
+.env.*
+!.env.example
+.keys/
+*.key
+
+# Medical documents and archives
+*.pdf
+*.zip
+
+# Local tooling
+.claude/
+*.tar.gz

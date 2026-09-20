@@ -1,0 +1,10 @@
+fastapi==0.141.1
+uvicorn[standard]==0.34.0
+sqlmodel==0.0.22
+pydantic-settings==2.7.1
+httpx==0.28.1
+itsdangerous==2.2.0
+pypdfium2==5.13.0
+pillow==12.3.0
+cryptography==50.0.1
+python-multipart==0.0.32

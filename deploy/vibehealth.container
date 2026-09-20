@@ -1,0 +1,54 @@
+# VibeHealth as a rootless Podman container run by systemd (a Quadlet).
+# Install: see deploy/README.md. Copy to ~/.config/containers/systemd/vibehealth.container
+
+[Unit]
+Description=VibeHealth (private health records)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+# Build it once:  podman build --format docker -t localhost/vibehealth:latest .
+# (or replace with an image you pulled from a registry)
+Image=localhost/vibehealth:latest
+ContainerName=vibehealth
+
+# Data folder on the host. Z: SELinux label. U: chown it to the app's uid inside the container,
+# so it works for rootless Podman without a manual chown. Back up this whole folder.
+Volume=%h/vibehealth-data:/data:Z,U
+
+# Loopback only. For a LAN or Tailscale address use e.g. PublishPort=192.0.2.10:5001:5001
+# and read "Exposing safely" in the README.
+# The Environment= line below must name the SAME address as PublishPort: change BOTH together.
+# The app skips the start-up exposure warnings only when it is a loopback address, and warns otherwise.
+PublishPort=127.0.0.1:5001:5001
+Environment=VIBEHEALTH_PUBLISHED_ON=127.0.0.1
+
+# Reach Ollama running on the host (the default OLLAMA_URL is http://host.docker.internal:11434).
+AddHost=host.docker.internal:host-gateway
+
+# Optional settings and secrets live in a private file, never inline in this unit:
+#   mkdir -p ~/.config/vibehealth && cp .env.example ~/.config/vibehealth/vibehealth.env
+#   chmod 600 ~/.config/vibehealth/vibehealth.env
+# Then uncomment (the file must exist, or the service does not start):
+# EnvironmentFile=%h/.config/vibehealth/vibehealth.env
+
+# Hardening (the app writes only to /data and /tmp).
+ReadOnly=true
+Tmpfs=/tmp
+DropCapability=ALL
+NoNewPrivileges=true
+# Memory=1g
+
+HealthCmd=python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:5001/api/health', timeout=4).read()"
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=40s
+HealthRetries=3
+
+[Service]
+Restart=always
+# The first start can be slow (migrations, self-test).
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

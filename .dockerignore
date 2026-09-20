@@ -1,0 +1,46 @@
+# Keep the build context small and free of anything private.
+.git
+.gitignore
+.claude
+.github
+.vscode
+.idea
+
+# Never in the image: data, backups, secrets
+data
+uploads
+backups
+archive
+*.db
+*.db-*
+*.sqlite*
+.env
+.env.*
+*.env
+!.env.example
+*.key
+.keys
+
+# Build output and caches (rebuilt inside the image)
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.venv
+**/.mypy_cache
+**/.ruff_cache
+
+# Not needed at run time
+docs
+backend/tests
+backend/pytest.ini
+backend/requirements-dev.txt
+backend/verify-pinned.sh
+deploy
+compose.yaml
+Dockerfile
+.dockerignore
+*.md
+LICENSE

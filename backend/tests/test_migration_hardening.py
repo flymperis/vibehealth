@@ -61,7 +61,7 @@ def test_the_untouched_v1_shape_is_accepted(tmp_path):
     path = legacy_db(tmp_path)
     with sqlite3.connect(path) as c:
         assert migrations._v1_shape_problems(c) == []
-    assert migrations.run(make_engine(path))["applied"] == [1, 2]
+    assert migrations.run(make_engine(path))["applied"] == [1, 2, 3]
     assert shape(path) == fresh_shape(tmp_path)
 
 
@@ -116,7 +116,7 @@ def test_a_bad_backup_is_detected_and_removed_and_the_start_is_refused(tmp_path,
     assert dump(path) == before and version(path) == 0  # nothing was migrated: not even the baseline
     monkeypatch.undo()
     result = migrations.run(make_engine(path))  # and the same start works once the disk is fine
-    assert result["applied"] == [1, 2] and len(backups_of(tmp_path)) == 1
+    assert result["applied"] == [1, 2, 3] and len(backups_of(tmp_path)) == 1
 
 
 def test_a_backup_that_cannot_be_written_leaves_nothing_behind(tmp_path, monkeypatch):
@@ -196,7 +196,7 @@ def test_several_migrations_in_one_start_share_one_backup(tmp_path):
 def test_a_start_that_loses_the_race_skips_the_migration_and_changes_nothing(tmp_path, monkeypatch):
     """Start A has decided to migrate (it read the version and took its backup) when start B completes
     the whole migration. A then gets the write lock, reads the version again inside the transaction,
-    sees 2 and stands down: no second rebuild, no error, the data exactly as B left it."""
+    sees 3 and stands down: no second rebuild, no error, the data exactly as B left it."""
     path = legacy_db(tmp_path)
     real_backup = migrations.backup_database
     other = {}
@@ -212,9 +212,9 @@ def test_a_start_that_loses_the_race_skips_the_migration_and_changes_nothing(tmp
 
     monkeypatch.setattr(migrations, "backup_database", backup_then_the_other_start_finishes)
     result = migrations.run(make_engine(path))  # start A
-    assert other["result"]["applied"] == [1, 2]
+    assert other["result"]["applied"] == [1, 2, 3]
     assert result["applied"] == [] and result["from"] == 0
-    assert version(path) == 2 and dump(path) == other["dump"]
+    assert version(path) == 3 and dump(path) == other["dump"]
     with sqlite3.connect(path) as c:
         assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert c.execute("PRAGMA foreign_key_check").fetchall() == []

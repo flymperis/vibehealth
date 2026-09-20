@@ -5,13 +5,15 @@ import {
   api,
   type CatalogTest,
   type MedicalDocument,
+  type DocumentReport,
   type DocumentValues,
   type ExtractedValue,
   type ReadingSettingsResponse,
+  type ReportDetail,
   type ValueStatus,
 } from "../api";
 import { useI18n } from "../i18n";
-import { Flag, Pill, ReadingBadge, isActive, reasonText, stageText, testName } from "../reading";
+import { DocumentBadge, Flag, Pill, isActive, reasonText, stageText, testName } from "../reading";
 import { Button, Card, EmptyState, Input, Select, Spinner, buttonClass, formatBytes, formatDate } from "../ui";
 import { refreshDocumentQueries } from "../upload";
 import { DeleteDocumentDialog, EditDocumentDialog } from "./DocumentDialogs";
@@ -36,15 +38,24 @@ export default function DocumentReview() {
     queryKey: ["reading-settings"],
     queryFn: () => api.get<ReadingSettingsResponse>("/reading/settings"),
   });
+  // A narrative report (imaging, opinion, prescription) has a summary and text instead of values to review.
+  const textMode = data?.document.read_mode === "text";
+  const { data: reportData } = useQuery({
+    queryKey: ["report", id],
+    queryFn: () => api.get<DocumentReport>(`/documents/${id}/report`),
+    enabled: textMode,
+    refetchInterval: () => (isActive(data?.document.reading) ? 2500 : false),
+  });
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["values", id] });
+    queryClient.invalidateQueries({ queryKey: ["report", id] });
     queryClient.invalidateQueries({ queryKey: ["documents"] });
   };
   const onError = (e: Error) => setNotice(e.message || t("common.error"));
 
   const read = useMutation({
-    mutationFn: () => api.post(`/documents/${id}/read`),
+    mutationFn: (asLab: boolean) => api.post(`/documents/${id}/read${asLab ? "?as_lab=true" : ""}`),
     onMutate: () => setNotice(""),
     onSuccess: refresh,
     onError,
@@ -77,6 +88,8 @@ export default function DocumentReview() {
   const count = (s: ValueStatus) => values.filter((v) => v.status === s).length;
   const unapproved = values.length - count("approved");
   const uploaded = doc.source === "upload";
+  const report = reportData?.report ?? null;
+  const hasRead = textMode ? !!report : !!run;
 
   return (
     <div className="flex flex-col gap-4">
@@ -89,7 +102,7 @@ export default function DocumentReview() {
           {uploaded && <Pill tone="gray">{t("doc.uploaded")}</Pill>}
           <span>{doc.doc_date ? formatDate(doc.doc_date) : t("doc.notSet")}</span>
           <span>· {t(`kind.${doc.kind}` as "kind.other")}</span>
-          <ReadingBadge reading={reading} />
+          <DocumentBadge doc={doc} />
         </div>
         {uploaded && doc.original_filename && (
           <p className="text-xs muted [overflow-wrap:anywhere]">
@@ -103,8 +116,8 @@ export default function DocumentReview() {
 
       <Card className="flex flex-col gap-3 p-4">
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => read.mutate()} disabled={active || !enabled || read.isPending}>
-            {run ? t("review.readAgain") : t("review.read")}
+          <Button onClick={() => read.mutate(false)} disabled={active || !enabled || read.isPending}>
+            {hasRead ? t("review.readAgain") : textMode ? t("review.readReport") : t("review.read")}
           </Button>
           {doc.has_file && (
             <a
@@ -136,9 +149,17 @@ export default function DocumentReview() {
         {!enabled ? (
           <p className="text-xs text-amber-600">{t("review.disabled")}</p>
         ) : (
-          <p className="text-xs muted">{run ? t("review.readAgainHint") : t("review.readHint")}</p>
+          <p className="text-xs muted">
+            {textMode
+              ? hasRead
+                ? t("review.readAgainReportHint")
+                : t("review.readReportHint")
+              : run
+                ? t("review.readAgainHint")
+                : t("review.readHint")}
+          </p>
         )}
-        {active && reading && <Progress reading={reading} />}
+        {active && reading && <Progress reading={reading} textMode={textMode} />}
         {run && !active && (
           <div className="flex flex-col gap-1 text-xs muted">
             {run.status === "done" || run.status === "cleared" ? (
@@ -171,6 +192,16 @@ export default function DocumentReview() {
         {notice && <p className="text-sm">{notice}</p>}
       </Card>
 
+      {textMode && report && (
+        <>
+          {report.lab_pages.length > 0 && values.length === 0 && !active && (
+            <LabNotice pages={report.lab_pages} disabled={!enabled || read.isPending} onRead={() => read.mutate(true)} />
+          )}
+          <ReportView report={report} />
+        </>
+      )}
+      {textMode && !report && !active && values.length === 0 && <EmptyState>{t("report.notRead")}</EmptyState>}
+
       {values.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -198,7 +229,7 @@ export default function DocumentReview() {
       )}
 
       {values.length === 0 ? (
-        !active && <EmptyState>{t("review.none")}</EmptyState>
+        !active && !textMode && <EmptyState>{t("review.none")}</EmptyState>
       ) : (
         GROUPS.map((status) => {
           const rows = values.filter((v) => v.status === status);
@@ -270,18 +301,26 @@ function SetDate({ doc, onError }: { doc: MedicalDocument; onError: (e: Error) =
   );
 }
 
-function Progress({ reading }: { reading: NonNullable<DocumentValues["document"]["reading"]> }) {
+function Progress({
+  reading,
+  textMode,
+}: {
+  reading: NonNullable<DocumentValues["document"]["reading"]>;
+  textMode: boolean;
+}) {
   const { t } = useI18n();
-  // reader A and reader B each pass over every page
-  const steps = reading.pages * 2 || 1;
+  // lab values: reader A and reader B each pass over every page. A text report: one pass, then the summary.
+  const steps = (textMode ? reading.pages + 1 : reading.pages * 2) || 1;
   const done =
-    reading.stage === "reader_a"
+    reading.stage === "reader_a" || reading.stage === "transcribe"
       ? reading.page - 1
       : reading.stage === "reader_b"
         ? reading.pages + reading.page - 1
-        : reading.stage === "verify"
-          ? steps
-          : 0;
+        : reading.stage === "summary"
+          ? reading.pages
+          : reading.stage === "verify"
+            ? steps
+            : 0;
   const pct = Math.max(3, Math.round((done / steps) * 100));
   return (
     <div className="flex flex-col gap-1">
@@ -294,6 +333,77 @@ function Progress({ reading }: { reading: NonNullable<DocumentValues["document"]
           : `${stageText(t, reading.stage)}${reading.pages ? ` · ${reading.page}/${reading.pages}` : ""}`}
       </span>
     </div>
+  );
+}
+
+/** A page of lab results inside a text report: a way to read the whole document as a blood test. */
+function LabNotice({ pages, disabled, onRead }: { pages: number[]; disabled: boolean; onRead: () => void }) {
+  const { t } = useI18n();
+  const list = pages.join(", ");
+  return (
+    <div className="flex flex-col gap-2 rounded-xl bg-amber-500/10 p-3">
+      <p className="text-sm text-amber-900 dark:text-amber-200">
+        {pages.length === 1 ? t("report.labOne", { pages: list }) : t("report.labMany", { pages: list })}
+      </p>
+      <p className="text-xs muted">{t("report.labHint")}</p>
+      <div>
+        <Button variant="ghost" onClick={onRead} disabled={disabled}>
+          {t("report.labRead")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** The automatic summary of a text report, its key findings and the transcribed text of every page. */
+function ReportView({ report }: { report: ReportDetail }) {
+  const { t } = useI18n();
+  const failed = report.summary_status === "failed";
+  const empty = report.summary_status === "empty";
+  return (
+    <>
+      <Card className="flex flex-col gap-3 p-4">
+        {/* Written by a local model, not by the report's author: the label says so, the original prevails. */}
+        <p className="text-[11px] font-medium uppercase tracking-wide muted">{t("report.auto")}</p>
+        {failed && <p className="text-sm text-amber-600">{t("report.summaryFailed", { error: report.summary_error })}</p>}
+        {empty && <p className="text-sm text-amber-600">{t("report.summaryEmpty")}</p>}
+        {report.conclusion && (
+          <div className="flex flex-col gap-1">
+            <h2 className="text-sm font-semibold">{t("report.conclusion")}</h2>
+            <p className="text-sm [overflow-wrap:anywhere]">{report.conclusion}</p>
+          </div>
+        )}
+        {!failed && !empty && (
+          <div className="flex flex-col gap-1">
+            <h2 className="text-sm font-semibold">{t("report.findings")}</h2>
+            {report.key_findings.length ? (
+              <ul className="list-disc pl-5 text-sm [overflow-wrap:anywhere]">
+                {report.key_findings.map((f, i) => (
+                  <li key={i}>{f}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm muted">{t("report.noFindings")}</p>
+            )}
+          </div>
+        )}
+      </Card>
+      <Card className="p-4">
+        <details>
+          <summary className="cursor-pointer text-sm font-semibold">{t("report.fullText")}</summary>
+          <p className="mt-2 text-xs muted">{t("report.textNote")}</p>
+          <div className="mt-2 flex flex-col gap-3">
+            {report.pages.length === 0 && <p className="text-sm muted">{t("report.noText")}</p>}
+            {report.pages.map((p) => (
+              <section key={p.page} className="flex flex-col gap-1">
+                <h3 className="text-xs font-semibold muted">{t("review.page", { n: p.page })}</h3>
+                <pre className="font-sans text-sm leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">{p.text}</pre>
+              </section>
+            ))}
+          </div>
+        </details>
+      </Card>
+    </>
   );
 }
 

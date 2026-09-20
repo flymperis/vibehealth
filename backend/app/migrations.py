@@ -194,9 +194,51 @@ def _uploads(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# Version 3: text reports (imaging, medical opinions, prescriptions) keep their page text and an automatic
+# summary. Two new tables and nothing else: no existing table is touched, so no rebuild, and a release without
+# them still runs on the same database. Written out like version 2 (a migration must not change when the models
+# do), it has to end up identical to what `create_all` builds; IF NOT EXISTS makes it harmless where the tables
+# are already there.
+_TEXT_REPORTS_V3 = (
+    """
+CREATE TABLE IF NOT EXISTS document_texts (
+    id INTEGER NOT NULL,
+    document_id INTEGER NOT NULL,
+    page INTEGER NOT NULL,
+    text VARCHAR NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    FOREIGN KEY(document_id) REFERENCES documents (id) ON DELETE CASCADE
+)
+""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_document_texts_page ON document_texts (document_id, page)",
+    """
+CREATE TABLE IF NOT EXISTS document_reports (
+    document_id INTEGER NOT NULL,
+    summary_status VARCHAR NOT NULL,
+    summary_error VARCHAR NOT NULL,
+    conclusion VARCHAR NOT NULL,
+    key_findings VARCHAR NOT NULL,
+    auto_generated BOOLEAN NOT NULL,
+    summary_model VARCHAR NOT NULL,
+    lab_pages VARCHAR NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (document_id),
+    FOREIGN KEY(document_id) REFERENCES documents (id) ON DELETE CASCADE
+)
+""",
+)
+
+
+def _text_reports(conn: sqlite3.Connection) -> None:
+    for statement in _TEXT_REPORTS_V3:
+        conn.execute(statement)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "baseline", _baseline, changes_data=False),
     Migration(2, "uploads: documents source and file columns", _uploads, foreign_keys_off=True),
+    Migration(3, "text reports: page text and automatic summary tables", _text_reports),
 ]
 
 

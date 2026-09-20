@@ -1,5 +1,5 @@
 /** Shared bits of the lab-value reading UI. */
-import type { ExtractedValue, ReadingStage, ReadingState } from "./api";
+import type { ExtractedValue, MedicalDocument, ReadingStage, ReadingState } from "./api";
 import { useI18n } from "./i18n";
 
 type T = ReturnType<typeof useI18n>["t"];
@@ -95,4 +95,25 @@ export function ReadingBadge({ reading }: { reading: ReadingState | null | undef
       );
     }
   }
+}
+
+/**
+ * The badge of a document in a list. A text report (imaging, opinion, prescription) shows what its automatic
+ * summary found instead of lab counts; every other document, and a report never read as one, shows the reading.
+ */
+export function DocumentBadge({ doc }: { doc: MedicalDocument }) {
+  const { t } = useI18n();
+  const report = doc.report;
+  if (doc.read_mode !== "text" || doc.reading?.state !== "done" || !report) {
+    return <ReadingBadge reading={doc.reading} />;
+  }
+  if (report.status === "failed" || report.status === "empty") {
+    return <Pill tone="amber">{t("report.badgeNone")}</Pill>;
+  }
+  if (report.findings === 0) return <Pill tone="gray">{t("report.badgeSummary")}</Pill>;
+  return (
+    <Pill tone="gray">
+      {report.findings === 1 ? t("report.badge1") : t("report.badge", { n: report.findings })}
+    </Pill>
+  );
 }

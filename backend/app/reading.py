@@ -1,8 +1,14 @@
-"""Read lab values out of one document.
+"""Read one document. What that means depends on its kind (models.LAB_KINDS).
 
+A lab document: read lab values.
 load the file (Paperless download, or the upload from disk; memory only) -> render pages -> reader A (qwen3.5, JSON rows)
 -> reader B (glm-ocr text -> glm_parser, dpi fallback when cut short)
 -> Paperless OCR text as the third source (none for an upload) -> verify.combine -> save.
+
+A text report (imaging, medical opinion, prescription): load the file -> render pages -> reader A transcribes each
+page -> one text-only call writes a summary (conclusion and key findings) -> save the text and the summary. Reader B
+and the lab extractor are not used; a page that looks like a lab table is only noted (`report.looks_like_lab_page`),
+and a person can ask for the lab reading of the whole document.
 """
 
 from __future__ import annotations
@@ -16,12 +22,21 @@ from datetime import datetime
 from sqlalchemy import delete
 from sqlmodel import Session, col, func, select
 
-from . import reading_settings, sources
+from . import reading_settings, report, sources
 from .catalog import num, to_canonical_unit
 from .db import engine
 from .glm_parser import parse as parse_glm
 from .glm_parser import truncated
-from .models import Document, ExtractedValue, ExtractionRun, RunStatus, ValueStatus
+from .models import (
+    Document,
+    DocumentReport,
+    DocumentText,
+    ExtractedValue,
+    ExtractionRun,
+    RunStatus,
+    ValueStatus,
+    reads_lab_values,
+)
 from .ollama import Ollama, OllamaError, PageError, SafeError, describe
 from .paperless import Paperless
 from .render import Pages
@@ -47,8 +62,9 @@ async def _check_models(client: Ollama, wanted: list[str]) -> None:
             raise OllamaError(f"model {model} is not installed in Ollama")
 
 
-async def read_document(document_id: int, progress: dict) -> dict:
-    """Run the whole pipeline for one document. Returns the run summary."""
+async def read_document(document_id: int, progress: dict, force_lab: bool = False) -> dict:
+    """Run the whole pipeline for one document. Returns the run summary. A text report is read as one
+    (transcription and summary) unless `force_lab`: then the lab-value pipeline runs whatever its kind."""
     settings = reading_settings.load()
     if not settings.enabled:
         raise ReadingError("reading is turned off in Settings")
@@ -57,7 +73,8 @@ async def read_document(document_id: int, progress: dict) -> dict:
         doc = session.get(Document, document_id)
         if doc is None:
             raise ReadingError(f"document {document_id} not found")
-        ref, title = sources.DocRef.of(doc), doc.title
+        ref, title, kind = sources.DocRef.of(doc), doc.title, doc.kind
+        lab = force_lab or reads_lab_values(kind)
         run = ExtractionRun(document_id=document_id, settings=settings.model_dump_json())
         session.add(run)
         session.commit()
@@ -71,13 +88,19 @@ async def read_document(document_id: int, progress: dict) -> dict:
     try:
         paperless = Paperless()
         client = Ollama(settings.ollama_url, settings.timeout_seconds, settings.num_ctx, settings.keep_alive)
-        models = [settings.reader_a_model] + ([settings.reader_b_model] if settings.reader_b_enabled else [])
+        models = [settings.reader_a_model] + ([settings.reader_b_model] if lab and settings.reader_b_enabled else [])
         await _check_models(client, models)
 
         # Paperless: downloaded and drawn in this process, as before. Upload: drawn by the sandbox.
-        pages, content = await sources.load_pages(ref, paperless=paperless, use_text=settings.use_paperless_text)
+        pages, content = await sources.load_pages(
+            ref, paperless=paperless, use_text=settings.use_paperless_text and lab
+        )
         total = len(pages)
         _set(progress, pages=total)
+
+        if not lab:
+            await _read_report(client, settings, pages, document_id, kind, progress, page_errors)
+            return _finish(run_id, RunStatus.DONE, started, total, page_errors, "", {})
 
         # Reader A, page by page (the GPU holds one model at a time).
         rows_a: list[ReaderRow] = []
@@ -138,6 +161,73 @@ async def read_document(document_id: int, progress: dict) -> dict:
     finally:
         if pages is not None:
             await asyncio.to_thread(pages.close)  # (Paperless pages: closing takes the pdfium lock, off the loop)
+
+
+async def _read_report(client: Ollama, settings, pages: Pages, document_id: int, kind, progress: dict,
+                       page_errors: list[dict]) -> None:
+    """A text report: reader A transcribes every page, then one call summarises the text. The text is kept even
+    when the summary fails (that is noted in the report, not raised: reading again retries it)."""
+    total = len(pages)
+    texts: dict[int, str] = {}
+    for i in range(total):
+        _set(progress, stage="transcribe", page=i + 1)
+        try:
+            png = await asyncio.to_thread(pages.png, i, settings.dpi)
+        except (SandboxError, Refused) as exc:
+            page_errors.append({"page": i + 1, "reader": "A", "error": "the page could not be drawn: " + describe(exc)})
+            continue
+        try:
+            text, cut = await client.read_page_text(settings.reader_a_model, png)
+        except PageError as exc:
+            page_errors.append({"page": i + 1, "reader": "A", "error": describe(exc)})
+            continue
+        texts[i + 1] = text
+        if cut:
+            page_errors.append({"page": i + 1, "reader": "A", "error": "text cut off (length): kept the partial text"})
+    if total and not texts:
+        # Keep whatever an earlier reading left rather than replace it with nothing.
+        raise ReadingError("no page could be read: " + page_errors[0]["error"])
+
+    _set(progress, stage="summary", page=total)
+    summary = await _summarize(client, settings, kind, texts)
+    lab_pages = [n for n, text in texts.items() if report.looks_like_lab_page(text)]
+    save_report(document_id, texts, summary, lab_pages, settings.reader_a_model)
+
+
+async def _summarize(client: Ollama, settings, kind, texts: dict[int, str]) -> dict:
+    """{status, error, conclusion, key_findings}. A model failure is a status, never an exception."""
+    text = report.summary_input(texts, settings.num_ctx)
+    try:
+        answer = await client.summarize(settings.reader_a_model, text, report.KIND_NAMES.get(kind, "medical document"))
+    except Exception as exc:  # noqa: BLE001 - the text is worth keeping whatever went wrong
+        if isinstance(exc, SafeError):
+            log.warning("summary of a report failed: %s", describe(exc))
+        else:
+            log.warning("summary of a report failed", exc_info=True)
+        return {"status": "failed", "error": describe(exc), "conclusion": "", "key_findings": []}
+    conclusion, findings = report.clean_summary(answer)
+    return {"status": "ok" if conclusion or findings else "empty", "error": "",
+            "conclusion": conclusion, "key_findings": findings}
+
+
+def save_report(document_id: int, texts: dict[int, str], summary: dict, lab_pages: list[int], model: str) -> None:
+    """Replace the document's page text and summary, and the lab values of an earlier reading that nobody
+    approved (an imaging report once read by the lab extractor leaves none of its junk behind)."""
+    with Session(engine) as session:
+        session.execute(delete(DocumentText).where(DocumentText.document_id == document_id))
+        for page, text in sorted(texts.items()):
+            session.add(DocumentText(document_id=document_id, page=page, text=text))
+        row = session.get(DocumentReport, document_id) or DocumentReport(document_id=document_id)
+        row.summary_status, row.summary_error = summary["status"], summary["error"]
+        row.conclusion = summary["conclusion"]
+        row.key_findings = json.dumps(summary["key_findings"], ensure_ascii=False)
+        row.auto_generated = True
+        row.summary_model = model
+        row.lab_pages = json.dumps(lab_pages)
+        row.updated_at = datetime.now()
+        session.add(row)
+        clear_unapproved(session, document_id)
+        session.commit()
 
 
 async def _read_b(client: Ollama, settings, pages: Pages, index: int, first_png: bytes) -> tuple[str, str]:

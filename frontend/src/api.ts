@@ -102,7 +102,19 @@ export interface MedicalDocument {
   size_bytes: number | null;
   /** A preview / thumbnail can be shown (an upload whose file went missing: false). */
   has_file: boolean;
+  /** "text": a narrative report (imaging, opinion, prescription): findings and a conclusion, no lab values to review. */
+  read_mode: "lab" | "text";
   reading: ReadingState | null;
+  /** A text report that has been read: how its automatic summary went; null otherwise. */
+  report: ReportBrief | null;
+}
+
+export interface ReportBrief {
+  /** "ok", "failed" (the text is kept, no summary) or "empty". */
+  status: "" | "ok" | "failed" | "empty";
+  findings: number;
+  /** The start of the automatic conclusion (list line). */
+  conclusion: string;
 }
 
 export interface DocumentPatch {
@@ -203,7 +215,7 @@ export function uploadDocument(
   };
 }
 
-export type ReadingStage = "" | "queued" | "download" | "reader_a" | "reader_b" | "verify";
+export type ReadingStage = "" | "queued" | "download" | "reader_a" | "reader_b" | "verify" | "transcribe" | "summary";
 
 /** Where a document stands with reading its lab values (computed on the server). */
 export interface ReadingState {
@@ -603,4 +615,25 @@ export interface ReadingWorker {
     | ({ document_id: number; title: string } & Partial<RunSummary> & { status: string })
     | null;
   last_error: string | null;
+}
+
+/** GET /api/documents/{id}/report: what was read from a text report. */
+export interface DocumentReport {
+  document: MedicalDocument;
+  /** null until the document has been read as a text report. */
+  report: ReportDetail | null;
+}
+
+export interface ReportDetail {
+  /** Always true: written by a local model, not by the report's author. The original prevails. */
+  auto: boolean;
+  summary_status: "" | "ok" | "failed" | "empty";
+  summary_error: string;
+  summary_model: string;
+  conclusion: string;
+  key_findings: string[];
+  /** Pages whose text looks like a table of lab results. */
+  lab_pages: number[];
+  updated_at: string;
+  pages: { page: number; text: string }[];
 }

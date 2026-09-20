@@ -18,11 +18,21 @@ from sqlalchemy import delete
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
-from .. import reading_settings, settings_store, sources, uploads
+from .. import reading_settings, report, settings_store, sources, uploads
 from ..catalog import BY_CODE, ORDER, flag_for, num, to_canonical_unit
 from ..db import engine, get_session
 from ..middleware import set_body_limit
-from ..models import Document, DocumentKind, DocumentSource, ExtractedValue, ExtractionRun, ValueStatus
+from ..models import (
+    Document,
+    DocumentKind,
+    DocumentReport,
+    DocumentSource,
+    DocumentText,
+    ExtractedValue,
+    ExtractionRun,
+    ValueStatus,
+    reads_lab_values,
+)
 from ..reading import approved_codes, clear_unapproved, mark_cleared, reading_states, run_summary
 from ..security import password_hash, require_session
 from ..worker import begin_delete, end_delete, is_busy, request_read, state
@@ -50,7 +60,11 @@ class DocumentOut(BaseModel):
     mime_type: str | None  # uploads: application/pdf, image/jpeg, image/png, image/webp
     size_bytes: int | None  # uploads
     has_file: bool  # a preview / thumbnail can be shown (an upload whose file went missing: false)
+    # "lab": lab values are read from it; "text": it is a narrative report (findings and a conclusion). See models.LAB_KINDS.
+    read_mode: str = "lab"
     reading: dict | None = None
+    # A text report that has been read: {status, findings} of its automatic summary; else null.
+    report: dict | None = None
 
 
 def _states(session: Session, ids: list[int]) -> dict[int, dict]:
@@ -58,7 +72,7 @@ def _states(session: Session, ids: list[int]) -> dict[int, dict]:
     return reading_states(session, ids, reading["queue"], reading["current"])
 
 
-def _out(doc: Document, reading: dict | None = None) -> DocumentOut:
+def _out(doc: Document, reading: dict | None = None, summary: dict | None = None) -> DocumentOut:
     return DocumentOut(
         id=doc.id,
         source=doc.source,
@@ -72,8 +86,16 @@ def _out(doc: Document, reading: dict | None = None) -> DocumentOut:
         mime_type=doc.mime_type,
         size_bytes=doc.size_bytes,
         has_file=sources.has_file(doc),
+        read_mode="lab" if reads_lab_values(doc.kind) else "text",
         reading=reading,
+        report=summary,
     )
+
+
+def _outs(session: Session, docs: list[Document]) -> list[DocumentOut]:
+    ids = [d.id for d in docs]
+    states, summaries = _states(session, ids), report.summaries(session, ids)
+    return [_out(d, states.get(d.id), summaries.get(d.id)) for d in docs]
 
 
 def _get(session: Session, document_id: int) -> Document:
@@ -90,15 +112,12 @@ def list_documents(
     query = select(Document).order_by(Document.doc_date.desc(), Document.id.desc())
     if not include_ignored:
         query = query.where(Document.ignored == False)  # noqa: E712 - SQL comparison
-    docs = session.exec(query).all()
-    states = _states(session, [d.id for d in docs])
-    return [_out(doc, states.get(doc.id)) for doc in docs]
+    return _outs(session, session.exec(query).all())
 
 
 @router.get("/{document_id}")
 def get_document(document_id: int, session: Session = Depends(get_session)) -> DocumentOut:
-    doc = _get(session, document_id)
-    return _out(doc, _states(session, [doc.id]).get(doc.id))
+    return _outs(session, [_get(session, document_id)])[0]
 
 
 @router.get("/{document_id}/thumbnail")
@@ -130,7 +149,7 @@ def ignore(
     session.add(doc)
     session.commit()
     session.refresh(doc)
-    return _out(doc)
+    return _outs(session, [doc])[0]
 
 
 # --- uploads -------------------------------------------------------------------
@@ -290,8 +309,7 @@ async def upload_document(request: Request) -> Response:
         queued = bool(request_read([doc_id]))
     with Session(engine) as session:
         doc = _get(session, doc_id)
-        body = {"document": _out(doc, _states(session, [doc_id]).get(doc_id)).model_dump(mode="json"),
-                "read_queued": queued}
+        body = {"document": _outs(session, [doc])[0].model_dump(mode="json"), "read_queued": queued}
     return JSONResponse(body, status_code=201)
 
 
@@ -348,7 +366,7 @@ def edit_document(document_id: int, body: DocumentPatch, session: Session = Depe
         session.add(doc)
         session.commit()
         session.refresh(doc)
-    return _out(doc, _states(session, [doc.id]).get(doc.id))
+    return _outs(session, [doc])[0]
 
 
 @router.delete("/{document_id}")
@@ -367,6 +385,8 @@ def delete_document(document_id: int, session: Session = Depends(get_session)) -
     try:
         session.execute(delete(ExtractedValue).where(col(ExtractedValue.document_id) == document_id))
         session.execute(delete(ExtractionRun).where(col(ExtractionRun.document_id) == document_id))
+        session.execute(delete(DocumentText).where(col(DocumentText.document_id) == document_id))
+        session.execute(delete(DocumentReport).where(col(DocumentReport.document_id) == document_id))
         session.delete(doc)
         session.commit()
     finally:
@@ -409,12 +429,22 @@ def _value_out(v: ExtractedValue) -> ValueOut:
 
 
 @router.post("/{document_id}/read")
-def read(document_id: int, session: Session = Depends(get_session)) -> dict:
+def read(document_id: int, as_lab: bool = False, session: Session = Depends(get_session)) -> dict:
+    """Queue a reading. A text report (imaging, opinion, prescription) is transcribed and summarised;
+    `as_lab=true` reads it for lab values instead (a report with a page of blood results in it)."""
     _get(session, document_id)
     if not reading_settings.load().enabled:
         raise HTTPException(409, "reading is turned off in Settings")
-    added = request_read([document_id])
+    added = request_read([document_id], force_lab=as_lab)
     return {"queued": bool(added), "already": not added}
+
+
+@router.get("/{document_id}/report")
+def get_report(document_id: int, session: Session = Depends(get_session)) -> dict:
+    """What was read from a text report: the automatic summary (conclusion, key findings, how it went), the
+    text of every page and the pages that look like lab results. `report` is null until it has been read."""
+    doc = _get(session, document_id)
+    return {"document": _outs(session, [doc])[0], "report": report.detail(session, document_id)}
 
 
 @router.get("/{document_id}/values")
@@ -428,7 +458,7 @@ def values(document_id: int, session: Session = Depends(get_session)) -> dict:
         .order_by(col(ExtractionRun.id).desc())
     ).first()
     return {
-        "document": _out(doc, _states(session, [doc.id]).get(doc.id)),
+        "document": _outs(session, [doc])[0],
         "last_run": run_summary(run) if run else None,
         "values": [_value_out(v) for v in rows],
     }
@@ -729,8 +759,7 @@ def dashboard_summary(
         .order_by(Document.doc_date.desc(), Document.id.desc())
         .limit(recent_limit)
     ).all()
-    states = _states(session, [d.id for d in recent_docs])
-    recent_documents = [_out(d, states.get(d.id)) for d in recent_docs]
+    recent_documents = _outs(session, recent_docs)
 
     flagged_rows = session.exec(_flagged_query().limit(flagged_limit)).all()
     flagged_values_out = [_flagged_out(v, doc) for v, doc in flagged_rows]
@@ -799,8 +828,7 @@ def examinations(
             .where(Document.kind == kind, Document.ignored == False)  # noqa: E712
             .order_by(Document.doc_date.desc(), Document.id.desc())
         ).all()
-        states = _states(session, [d.id for d in docs])
-        return ExaminationsOut(kind=kind, documents=[_out(d, states.get(d.id)) for d in docs])
+        return ExaminationsOut(kind=kind, documents=_outs(session, docs))
 
     rows = session.exec(
         select(ExtractedValue, Document)

@@ -33,6 +33,8 @@ Schema versions are tracked in `PRAGMA user_version` (see "Migrations").
   (`enc:v1:<token>`).
 - `extraction_runs`: one reading of a document: status (running, done, error, interrupted, cleared), timing, pages,
   page errors, the settings used, counts.
+- `document_texts` (one row per page) and `document_reports` (one row per document): the transcribed text and the
+  automatic summary of a text report (see "The reading pipeline").
 - `extracted_values`: document, run, test code (nullable), printed name, value, unit, reference range, flag, status
   (`verified`, `needs_review`, `approved`, `rejected`), reason, page, and what each reader read. A partial unique
   index allows **one approved value per test per document**.
@@ -65,6 +67,20 @@ For one document (`reading.py`):
    - The H/L flag is computed from the printed range. Units are kept as printed (no conversion yet).
 8. **Save**: the document's non-approved values are replaced. Approved values stay, and a test that already has an
    approved value gets no new row.
+
+**Text reports.** Which pipeline a document goes through depends on its kind (`models.LAB_KINDS`: blood test and
+other read lab values as above; imaging, medical opinion (`report`) and prescription are text reports). A text report
+skips reader B, the Paperless text and the verification. Reader A gets a "transcribe this page" prompt (plain text,
+`temperature` 0; an answer cut off at the length limit is kept and noted) for every page, then one text-only call with
+a JSON schema returns `conclusion` and at most 8 `key_findings` from the joined page text (kept to about `num_ctx`
+characters: the start and the end of a longer report). Page text goes to `document_texts` and the summary to
+`document_reports` (`summary_status` ok, empty or failed; `auto_generated` always true; the model used). A failed or
+empty summary never fails the reading: the text stays and reading again retries. Saving also removes the document's
+unapproved lab values, so a report once read by the lab extractor loses its junk rows; approved values stay. A page with
+at least four lines that hold a number, a unit and a reference range is listed in `lab_pages`, and the document then
+offers "read as blood test" (`POST /api/documents/{id}/read?as_lab=true`: the whole document goes through the lab
+readers). `GET /api/documents/{id}/report` returns the summary, the page text and `lab_pages`; the document lists carry
+`read_mode` and a short `report` line.
 
 Ollama calls run one at a time. Before a reading starts the installed models are checked, so the person sees "Ollama
 is not reachable" or "model X is not installed" rather than a generic failure. A model that rejects `think` is retried
@@ -231,6 +247,7 @@ kept (the last 10 models); never the file, its name, the expected list or what w
   per table); otherwise the copy is deleted and the start is refused. The newest few verified backups are kept.
 - A failed migration is rolled back completely and the app refuses to start. A database newer than the app is refused.
 - Version 2 added uploads (a rebuild of `documents` with foreign keys off, checked against a fresh schema in the tests).
+- Version 3 added `document_texts` and `document_reports` for text reports: two new tables, nothing existing is changed.
 - **Backing up**: the whole data folder. The database uses WAL, so copying `vibehealth.db` alone copies an empty shell: take
   `vibehealth.db*` together (or use `VACUUM INTO`), `uploads/` and `.keys/` (not needed if `SECRET_KEY` is set). `cache/`
   and `backups/` are optional. A database restored without `uploads/` still lists its documents, marked as having no file.
@@ -264,6 +281,9 @@ per-value confidence: what the readers disagree on goes to review.
 - The reading queue lives in memory. One person's records per instance, no per-document access control.
 - The data folder is unencrypted at rest, deleted files are not securely erased, and uploads are not scanned for malware.
 - Approved values are not shown anywhere else yet (no charts or per-test history).
+- Text reports: the transcription and the summary come from a 4B vision model and can be wrong; the summary is labelled
+  automatic and the original prevails. A very long report is summarised from its start and end only. The page text is
+  stored but not searchable in the app yet. "Read as blood test" reads the whole document, not single pages.
 
 ## Tests
 

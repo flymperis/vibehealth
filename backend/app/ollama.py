@@ -38,6 +38,32 @@ SCHEMA_A = {
 PROMPT_B = "Text Recognition:"  # glm-ocr's native OCR task
 NUM_PREDICT = 4096
 
+# Text reports (imaging, medical opinions, prescriptions): reader A only transcribes the page.
+PROMPT_TEXT = """This image is one page of a medical document (a report, an opinion or a prescription), possibly in Greek.
+Transcribe all the text on the page faithfully, in reading order, as plain text.
+Rules:
+- Keep the original language, numbers, units, names and line breaks exactly as printed.
+- Do not translate, summarise, explain or add anything. Do not describe images or logos.
+- If there is no text on the page, answer with nothing."""
+
+# The summary of a text report (a second, text-only call to the same model).
+PROMPT_SUMMARY = """Below is the text of a medical document ({kind}), read from scanned pages: it may contain small reading errors.
+Return JSON with two fields:
+- conclusion: the document's own conclusion, impression or opinion (e.g. "Συμπέρασμα", "Γνωμάτευση", "Impression"), copied or lightly shortened. If it has none, a summary of the document in 1 to 3 sentences.
+- key_findings: at most 8 short strings, one per important finding (what was found, where, with sizes or numbers as printed). Leave out normal boilerplate and repeated headers.
+Rules:
+- Use only what the text says. Never add a diagnosis, advice or a number that is not in the text.
+- Write in the language of the text.
+- If the text is empty or has nothing to summarise, return an empty conclusion and an empty list."""
+
+SCHEMA_SUMMARY = {
+    "type": "object",
+    "properties": {"conclusion": {"type": "string"},
+                   "key_findings": {"type": "array", "items": {"type": "string"}, "maxItems": 8}},
+    "required": ["conclusion", "key_findings"],
+}
+SUMMARY_NUM_PREDICT = 1024
+
 
 class SafeError(Exception):
     """An error whose message we wrote ourselves: fine to show in the UI (no URL, no
@@ -264,6 +290,39 @@ class Ollama:
     async def read_text(self, model: str, png: bytes) -> str:
         """Reader B: plain OCR text."""
         return self._content(await self._chat(self._body(model, PROMPT_B, png)))
+
+    async def read_page_text(self, model: str, png: bytes) -> tuple[str, bool]:
+        """A text report's page as plain text: (text, cut_off). Unlike the lab readers, an answer cut off at
+        the length limit is kept (a partial transcription is worth more than none) and reported as such."""
+        r = await self._chat(self._body(model, PROMPT_TEXT, png))
+        content = ((r.get("message") or {}).get("content") or "").strip()
+        if not content:
+            raise PageError("empty answer")
+        return content, r.get("done_reason") == "length"
+
+    async def summarize(self, model: str, text: str, kind: str) -> dict:
+        """{conclusion, key_findings} for the text of a report: one text-only call, JSON constrained by a schema."""
+        body = {
+            "model": model,
+            "stream": False,
+            "think": False,
+            "keep_alive": self.keep_alive,
+            "options": {"num_ctx": self.num_ctx, "temperature": 0, "num_predict": SUMMARY_NUM_PREDICT},
+            "format": SCHEMA_SUMMARY,
+            "messages": [
+                {"role": "system", "content": PROMPT_SUMMARY.format(kind=kind)},
+                {"role": "user", "content": text},
+            ],
+        }
+        content = self._content(await self._chat(body))
+        try:
+            data = json.loads(content)
+            conclusion, findings = data["conclusion"], data["key_findings"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise StructuredOutputError(BAD_JSON) from exc
+        if not isinstance(conclusion, str) or not isinstance(findings, list):
+            raise StructuredOutputError(BAD_JSON)
+        return {"conclusion": conclusion, "key_findings": [f for f in findings if isinstance(f, str)]}
 
 
 def _keep_alive(value: str) -> str | int:

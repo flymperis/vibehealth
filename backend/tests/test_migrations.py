@@ -58,7 +58,9 @@ def add_column(conn):
     conn.execute("ALTER TABLE documents ADD COLUMN note TEXT DEFAULT ''")
 
 
-V3 = Migration(3, "add note", add_column)
+# the next migration after the last real one: what "a later release" adds on top
+NEXT = latest_version() + 1
+V3 = Migration(NEXT, "add note", add_column)
 
 
 def test_fresh_db_is_created_and_stamped_latest(tmp_path):
@@ -76,7 +78,7 @@ def test_legacy_db_is_baselined_and_upgraded(tmp_path):
     path = legacy_db(tmp_path)
     engine = make_engine(path)
     result = migrations.run(engine)
-    assert result["from"] == 0 and result["applied"] == [1, 2] and not result["fresh"]
+    assert result["from"] == 0 and result["applied"] == [1, 2, 3] and not result["fresh"]
     assert version(path) == latest_version()
     with Session(engine) as s:
         assert len(s.exec(Document.__table__.select()).all()) == 3
@@ -91,13 +93,13 @@ def test_run_twice_changes_nothing(tmp_path):
     result = migrations.run(engine, [*MIGRATIONS, V3])
     assert result["applied"] == [] and result["backup"] is None
     assert schema(path) == first
-    assert version(path) == 3
+    assert version(path) == NEXT
 
 
 def test_backup_before_a_data_changing_migration_is_openable(tmp_path):
     path = legacy_db(tmp_path, rows=4)
     result = migrations.run(make_engine(path), [*MIGRATIONS, V3])
-    assert result["applied"] == [1, 2, 3]
+    assert result["applied"] == [1, 2, 3, NEXT]
     backup = result["backup"]
     assert backup and os.path.dirname(backup) == str(tmp_path / "backups")
     assert os.path.basename(backup).startswith("pre-v2-")  # named after the first migration that ran
@@ -122,8 +124,8 @@ def test_failed_migration_rolls_back_completely(tmp_path):
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
-        migrations.run(make_engine(path), [*MIGRATIONS, Migration(3, "broken", broken)])
-    assert version(path) == 2  # migrations 1 and 2 landed, the broken one did not
+        migrations.run(make_engine(path), [*MIGRATIONS, Migration(NEXT, "broken", broken)])
+    assert version(path) == NEXT - 1  # the real migrations landed, the broken one did not
     with sqlite3.connect(path) as c:
         assert "half_done" not in [r[1] for r in c.execute("PRAGMA table_info(documents)")]
 
@@ -141,10 +143,10 @@ def test_table_rebuild_runs_with_foreign_keys_off(tmp_path):
         conn.execute("DROP TABLE documents")
         conn.execute("ALTER TABLE documents_new RENAME TO documents")
 
-    m = Migration(3, "rebuild", rebuild, foreign_keys_off=True)
+    m = Migration(NEXT, "rebuild", rebuild, foreign_keys_off=True)
     migrations.run(make_engine(path), [*MIGRATIONS, m])
     assert seen["fk"] == 0
-    assert version(path) == 3
+    assert version(path) == NEXT
     with sqlite3.connect(path) as c:
         assert c.execute("SELECT count(*) FROM documents").fetchone()[0] == 3
 
@@ -155,8 +157,8 @@ def test_rebuild_that_orphans_rows_is_refused(tmp_path):
         conn.execute("DELETE FROM documents")
 
     with pytest.raises(MigrationError):
-        migrations.run(make_engine(path), [*MIGRATIONS, Migration(3, "orphan", orphan, foreign_keys_off=True)])
-    assert version(path) == 2
+        migrations.run(make_engine(path), [*MIGRATIONS, Migration(NEXT, "orphan", orphan, foreign_keys_off=True)])
+    assert version(path) == NEXT - 1
     with sqlite3.connect(path) as c:
         assert c.execute("SELECT count(*) FROM documents").fetchone()[0] == 3
 

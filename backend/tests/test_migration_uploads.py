@@ -64,7 +64,7 @@ def test_rows_and_ids_survive(tmp_path):
     assert [r[0] for r in before["documents"]] == [1, 5, 9]
 
     result = migrations.run(make_engine(path))
-    assert result["applied"] == [1, 2] and version(path) == 2
+    assert result["applied"] == [1, 2, 3] and version(path) == 3
 
     after = dump(path)
     assert {t: len(rows) for t, rows in after.items()} == {t: len(rows) for t, rows in before.items()}
@@ -95,7 +95,7 @@ def test_result_equals_a_fresh_install(tmp_path):
 def test_fresh_install_is_created_at_the_latest_version(tmp_path):
     path = str(tmp_path / "new.db")
     result = migrations.run(make_engine(path))
-    assert result["fresh"] and version(path) == migrations.latest_version() == 2
+    assert result["fresh"] and version(path) == migrations.latest_version() == 3
     assert result["backup"] is None
     assert shape(path) == fresh_shape(tmp_path)
 
@@ -109,7 +109,7 @@ def test_running_again_is_a_no_op(tmp_path):
     assert result["applied"] == [] and result["backup"] is None
     assert dump(path) == before and shape(path) == structure
     assert sorted(os.listdir(tmp_path / "backups")) == backups
-    assert version(path) == 2
+    assert version(path) == 3
 
 
 def test_a_backup_of_the_old_database_is_taken_first(tmp_path):
@@ -147,7 +147,7 @@ def test_failure_in_the_middle_rolls_back_and_names_the_backup(tmp_path):
         assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert "documents_new" not in [r[0] for r in c.execute("SELECT name FROM sqlite_master")]
     # the same start works once the cause is gone
-    assert migrations.run(make_engine(path))["applied"] == [2]
+    assert migrations.run(make_engine(path))["applied"] == [2, 3]
     assert {t: len(r) for t, r in dump(path).items()} == {t: len(r) for t, r in before.items()}
 
 
@@ -240,8 +240,8 @@ def test_a_database_already_in_the_new_shape_is_left_alone(tmp_path):
             " VALUES (1, 't', 'OTHER', 0, '2026-01-01', '2026-01-01')"
         )
     structure = shape(path)
-    assert migrations.run(make_engine(path))["applied"] == [1, 2]
-    assert shape(path) == structure and version(path) == 2
+    assert migrations.run(make_engine(path))["applied"] == [1, 2, 3]
+    assert shape(path) == structure and version(path) == 3
     assert dump(path)["documents"][0][8] == "paperless"
 
 

@@ -28,6 +28,18 @@ class DocumentKind(StrEnum):
     OTHER = "other"
 
 
+# How each kind is read. The one place to change it: a kind in LAB_KINDS goes through the lab-value
+# pipeline (two readers, values to review); every other kind is a narrative report, whose text is
+# transcribed and summarised (see reading.read_document). OTHER stays with the lab readers: a document
+# whose tags say nothing more specific is most often a lab sheet, and this is what it always did.
+LAB_KINDS: frozenset[DocumentKind] = frozenset({DocumentKind.BLOOD_TEST, DocumentKind.OTHER})
+
+
+def reads_lab_values(kind: DocumentKind | str) -> bool:
+    """True: lab values are read from it. False: it is read as a text report (findings and a conclusion)."""
+    return kind in LAB_KINDS
+
+
 class DocumentSource(StrEnum):
     PAPERLESS = "paperless"
     UPLOAD = "upload"
@@ -144,4 +156,41 @@ class ExtractedValue(SQLModel, table=True):
     reader_a: str | None = None
     reader_b: str | None = None
     created_at: datetime = Field(default_factory=now)
+    updated_at: datetime = Field(default_factory=now)
+
+
+# --- reading text reports ------------------------------------------------------
+# Imaging reports, medical opinions and prescriptions have findings and a conclusion, not a table of
+# values. Their page text and an automatic summary are kept in two tables of their own (migration 3):
+# `documents` is untouched, so a release without them still runs on the same database.
+
+
+class DocumentText(SQLModel, table=True):
+    """The text of one page of a text report, as the reader transcribed it (searchable later)."""
+
+    __tablename__ = "document_texts"
+    __table_args__ = (Index("ux_document_texts_page", "document_id", "page", unique=True),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    document_id: int = Field(foreign_key="documents.id", ondelete="CASCADE")
+    page: int
+    text: str = ""
+    created_at: datetime = Field(default_factory=now)
+
+
+class DocumentReport(SQLModel, table=True):
+    """The automatic summary of a text report. One row per document, replaced by every reading."""
+
+    __tablename__ = "document_reports"
+
+    document_id: int = Field(primary_key=True, foreign_key="documents.id", ondelete="CASCADE")
+    # "ok", "failed" (the text is kept, the model gave no summary: see summary_error) or "empty"
+    summary_status: str = ""
+    summary_error: str = ""
+    conclusion: str = ""
+    key_findings: str = "[]"  # JSON list of short strings
+    # Always true: written by a local model, not by the report's author. The original prevails.
+    auto_generated: bool = True
+    summary_model: str = ""
+    lab_pages: str = "[]"  # JSON list of page numbers that look like a table of lab results
     updated_at: datetime = Field(default_factory=now)

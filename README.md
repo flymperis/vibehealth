@@ -105,6 +105,14 @@ less strongly (more of them are left for you to review).
 
 Then open a document and press Read. Verified values can be approved in one step; the rest need a look.
 
+**Reports are not read for values.** A document of kind imaging, medical opinion or prescription has findings and a
+conclusion, not a table of lab values. It is not sent to the two lab readers: reader A transcribes its pages, and one
+more call to the same local model writes a short **automatic summary** (the conclusion and up to eight key findings).
+The document shows the summary (labelled as automatic; the original prevails), the findings and the full text per page.
+If the summary fails the text is kept and Read again retries it. A page that looks like lab results inside a report gets
+a notice with a button to read the whole document as a blood test. Blood tests and documents of kind "other" are read
+for values as before; which kinds are which is one constant, `LAB_KINDS` in `backend/app/models.py`.
+
 ## Configuration
 
 Everything can be set in the app. Environment variables are optional defaults: copy `.env.example` to `.env` and

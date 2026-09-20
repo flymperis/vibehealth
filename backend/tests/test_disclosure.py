@@ -74,7 +74,7 @@ def test_an_unexpected_sync_error_shows_only_its_class(connected, client, monkey
 
 
 def test_reading_errors_from_unexpected_failures_show_only_the_class(monkeypatch):
-    async def boom(document_id, progress):
+    async def boom(document_id, progress, force_lab=False):
         raise OSError("cannot read /data/secret.pdf from http://192.0.2.7:8000/api/documents/4/download/")
 
     monkeypatch.setattr(worker, "read_document", boom)
@@ -86,7 +86,7 @@ def test_reading_errors_from_unexpected_failures_show_only_the_class(monkeypatch
 
 
 def test_our_own_reading_messages_still_come_through(monkeypatch):
-    async def boom(document_id, progress):
+    async def boom(document_id, progress, force_lab=False):
         raise OllamaError("model glm-ocr is not installed in Ollama")
 
     monkeypatch.setattr(worker, "read_document", boom)

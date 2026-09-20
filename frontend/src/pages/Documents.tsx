@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type MedicalDocument, type SystemStatus } from "../api";
 import { useI18n } from "../i18n";
-import { Pill, ReadingBadge, isActive } from "../reading";
+import { DocumentBadge, Pill, isActive } from "../reading";
 import { Button, Card, EmptyState, Spinner, formatDate } from "../ui";
 import AddDocuments from "./AddDocuments";
 import { DeleteDocumentDialog, EditDocumentDialog } from "./DocumentDialogs";
@@ -103,9 +103,15 @@ export function DocumentRow({ doc, compact }: { doc: MedicalDocument; compact?: 
   const uploaded = doc.source === "upload";
 
   return (
-    <Card className={`flex flex-wrap items-center gap-x-4 gap-y-2 p-3 ${doc.ignored ? "opacity-50" : ""}`}>
-      {/* The thumbnail opens the document where its file lives: Paperless, or the review page for an upload. */}
-      {doc.paperless_link ? (
+    <Card
+      className={`relative flex flex-wrap items-center gap-x-4 gap-y-2 p-3 ${doc.ignored ? "opacity-50" : ""} ${
+        compact ? "hover:bg-black/5 dark:hover:bg-white/5" : ""
+      }`}
+    >
+      {/* The thumbnail opens the document where its file lives: Paperless, or the review page for an upload.
+          In the compact lists (Examinations, home) the whole card opens the document's page (the title link is
+          stretched over it); Paperless is one click further, on that page. */}
+      {doc.paperless_link && !compact ? (
         <a href={doc.paperless_link} target="_blank" rel="noreferrer" className="shrink-0">
           <Thumbnail doc={doc} />
         </a>
@@ -115,15 +121,23 @@ export function DocumentRow({ doc, compact }: { doc: MedicalDocument; compact?: 
         </Link>
       )}
       <div className="min-w-0 flex-1 basis-40">
-        <Link to={`/documents/${doc.id}`} className="line-clamp-2 text-sm font-medium [overflow-wrap:anywhere]">
+        <Link
+          to={`/documents/${doc.id}`}
+          className={`line-clamp-2 text-sm font-medium [overflow-wrap:anywhere] ${
+            compact ? "after:absolute after:inset-0 after:content-['']" : ""
+          }`}
+        >
           {doc.title}
         </Link>
         <p className="text-xs muted">
           {doc.doc_date ? formatDate(doc.doc_date) : t("doc.notSet")} · {t(`kind.${doc.kind}` as "kind.other")}
         </p>
+        {compact && doc.report?.conclusion && (
+          <p className="mt-0.5 line-clamp-2 text-xs [overflow-wrap:anywhere]">{doc.report.conclusion}</p>
+        )}
         <Link to={`/documents/${doc.id}`} className="mt-1 flex flex-wrap items-center gap-1">
           {uploaded && <Pill tone="gray">{t("doc.uploaded")}</Pill>}
-          <ReadingBadge reading={doc.reading} />
+          <DocumentBadge doc={doc} />
         </Link>
       </div>
       {!compact && !uploaded && (

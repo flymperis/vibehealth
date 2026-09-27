@@ -82,7 +82,7 @@ services:
   ollama:
     profiles: ["ollama"]
     # A concrete version (bump it deliberately, or let Dependabot propose it). Pinning by digest is a follow-up.
-    image: ollama/ollama:0.34.2
+    image: ollama/ollama:0.34.4
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama

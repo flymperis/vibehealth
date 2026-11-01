@@ -16,7 +16,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # --- 2. runtime -------------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
